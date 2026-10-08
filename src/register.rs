@@ -67,12 +67,26 @@ fn notify_assoc_changed() {
     }
 }
 
-/// Attach to the parent console so CLI output is visible when the exe is a
-/// windowed-subsystem binary launched from PowerShell/cmd.
+/// Attach to the parent console so CLI output is visible when the exe (a
+/// windowed-subsystem binary) is launched from PowerShell/cmd.
+///
+/// Only attaches when we have no usable stdout handle. If stdout is
+/// already a console, pipe, or redirected file (installers capture output
+/// via `Start-Process -RedirectStandardOutput`), we leave it alone so the
+/// redirection keeps working.
 pub fn attach_parent_console() {
-    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    use windows_sys::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_UNKNOWN};
+    use windows_sys::Win32::System::Console::{
+        AttachConsole, GetStdHandle, ATTACH_PARENT_PROCESS, STD_OUTPUT_HANDLE,
+    };
     unsafe {
-        AttachConsole(ATTACH_PARENT_PROCESS);
+        let stdout = GetStdHandle(STD_OUTPUT_HANDLE);
+        if GetFileType(stdout) == FILE_TYPE_UNKNOWN {
+            // No inherited/redirected stdout (e.g. launched from Explorer,
+            // or by a shell that gives GUI-subsystem processes no handles).
+            // Attach to the parent's console, if it has one.
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
     }
 }
 

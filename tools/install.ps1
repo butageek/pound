@@ -146,10 +146,26 @@ if (-not $NoPath) {
 # ------------------------------------------------------------ register ----
 if (-not $NoRegister) {
     Write-Step 'Registering Pound with Windows (HKCU only, no admin needed)'
+
+    # pound.exe is a GUI-subsystem binary (no console flash when opening
+    # .md files). PowerShell's call operator does NOT wait for GUI-subsystem
+    # executables and leaves $LASTEXITCODE unset, so launch it through
+    # Start-Process, wait for the real exit code, and capture its output
+    # for diagnostics.
+    $outLog = Join-Path $env:TEMP ("pound-register-out-" + [guid]::NewGuid().ToString('N') + '.txt')
+    $errLog = Join-Path $env:TEMP ("pound-register-err-" + [guid]::NewGuid().ToString('N') + '.txt')
     $registerArgs = @('register')
     if ($SetDefault) { $registerArgs += '--default' }
-    & $targetExe @registerArgs
-    if ($LASTEXITCODE -ne 0) { throw "pound register failed with exit code $LASTEXITCODE." }
+    $proc = Start-Process -FilePath $targetExe -ArgumentList $registerArgs `
+        -Wait -PassThru -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+    if ($proc.ExitCode -ne 0) {
+        $detail = ''
+        if (Test-Path $errLog) { $detail += (Get-Content $errLog -Raw) }
+        if (Test-Path $outLog) { $detail += (Get-Content $outLog -Raw) }
+        if ($detail) { $detail = "`npound said:`n$detail" }
+        throw "pound register failed with exit code $($proc.ExitCode).$detail"
+    }
+    Remove-Item $outLog, $errLog -ErrorAction SilentlyContinue
 }
 
 Write-Host ''

@@ -69,7 +69,12 @@ Windows cross-check).
 - `install.ps1` copies the exe to `%LOCALAPPDATA%\Pound`, adds a Start-menu
   shortcut + user PATH, and calls `pound register`.
 - The binary is built with the GUI subsystem (`windows_subsystem = "windows"`);
-  CLI subcommands attach to the parent console for output.
+  CLI subcommands attach to the parent console for output (unless stdout is
+  already a console/pipe/file, so redirection keeps working).
+- GOTCHA: PowerShell's call operator does NOT wait for GUI-subsystem
+  binaries and leaves `$LASTEXITCODE` unset. Launch pound from scripts with
+  `Start-Process -Wait -PassThru` (see tools/install.ps1 for the pattern,
+  including output capture for diagnostics).
 
 ## Debugging
 

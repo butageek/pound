@@ -14,10 +14,16 @@ $targetExe = Join-Path $InstallDir 'pound.exe'
 # -------------------------------------------------- unregister (registry) --
 if (Test-Path $targetExe) {
     Write-Step 'Removing registry entries'
-    & $targetExe unregister
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "pound unregister exited with code $LASTEXITCODE; continuing."
+    # GUI-subsystem exe: Start-Process -Wait, never the call operator
+    # (PowerShell does not wait for GUI-subsystem binaries).
+    $outLog = Join-Path $env:TEMP ("pound-unregister-out-" + [guid]::NewGuid().ToString('N') + '.txt')
+    $errLog = Join-Path $env:TEMP ("pound-unregister-err-" + [guid]::NewGuid().ToString('N') + '.txt')
+    $proc = Start-Process -FilePath $targetExe -ArgumentList @('unregister') `
+        -Wait -PassThru -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+    if ($proc.ExitCode -ne 0) {
+        Write-Warning "pound unregister exited with code $($proc.ExitCode); continuing."
     }
+    Remove-Item $outLog, $errLog -ErrorAction SilentlyContinue
 }
 else {
     Write-Warning 'pound.exe not found; skipping registry cleanup (keys stay in HKCU).'
