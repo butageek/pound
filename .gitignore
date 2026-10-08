@@ -1,0 +1,18 @@
+# Rust
+/target
+
+# Release packaging output
+/dist
+
+# Misc
+*.log
+.DS_Store
+AGENTS.local.md
+.env*
+
+# Editors
+.vscode/
+.idea/
+
+# Python
+__pycache__/

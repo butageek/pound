@@ -1,0 +1,42 @@
+Pound - quick start
+===================
+
+Pound is a markdown reader for Windows. Double-click any .md file to read
+it rendered; press Ctrl+U (or click "Source") to see the raw markdown in a
+side-by-side pane. No admin rights needed anywhere.
+
+1. RUN THE INSTALLER (recommended)
+
+   Open PowerShell and paste:
+
+     irm https://raw.githubusercontent.com/butageek/pound/main/tools/install.ps1 | iex
+
+   This installs Pound, registers it with Windows and adds it to your PATH.
+   To also make it the default app for .md files, download and run it with
+   -SetDefault instead:
+
+     irm https://raw.githubusercontent.com/butageek/pound/main/tools/install.ps1 -OutFile install.ps1
+     powershell -ExecutionPolicy Bypass -File .\install.ps1 -SetDefault
+
+2. OR INSTALL THIS FOLDER MANUALLY
+
+   - Keep pound.exe somewhere permanent, e.g.  C:\Tools\Pound
+   - Open PowerShell in that folder and run:
+
+       .\pound.exe register --default
+
+   - If Windows still asks which app to use for .md files, choose Pound
+     once with "Always" (Windows protects the default-app setting).
+
+3. USE IT
+
+   - Double-click a .md file, or run:  pound file.md
+   - Drag a .md file onto the window any time.
+   - Ctrl+U or the "Source" checkbox toggles the side-by-side pane.
+   - Files reload automatically when saved from another editor.
+
+Notes
+-----
+- The build is unsigned: SmartScreen may warn the first time
+  ("More info" > "Run anyway").
+- Source code: https://github.com/butageek/pound

@@ -1,0 +1,63 @@
+# Release: pushing a version tag (v0.1.0) cross-builds the Windows zip via
+# scripts/package.sh and publishes it as a GitHub Release with notes
+# generated from the commits since the previous tag (this repo pushes
+# directly to main, so GitHub's PR-based --generate-notes comes up empty).
+# End users install with the irm one-liner in the README; tools/install.ps1
+# fetches pound-<version>-win64.zip from the latest release.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # required to create the release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # full history: needed to list commits since the previous tag
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - name: Install mingw-w64 (windows-gnu cross-linking + icon windres)
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+
+      - name: Unit tests
+        run: cargo test
+
+      - name: Build release zip (pound.exe + QUICK-START + LICENSE)
+        run: ./scripts/package.sh
+
+      - name: Compose release notes from commits since the previous tag
+        run: |
+          PREV="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+          if [ -n "$PREV" ]; then
+            {
+              echo "## What's Changed"
+              git log --oneline "${PREV}..${GITHUB_REF_NAME}" \
+                | sed 's/^\([0-9a-f]\{7,\}\) /- `\1` /'
+              echo
+              echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV}...${GITHUB_REF_NAME}"
+            } > release-notes.md
+          fi
+
+      - name: Create GitHub Release with the zip attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -s release-notes.md ]; then
+            gh release create "${GITHUB_REF_NAME}" dist/*.zip \
+              --title "Pound ${GITHUB_REF_NAME}" \
+              --notes-file release-notes.md
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/*.zip \
+              --title "Pound ${GITHUB_REF_NAME}" \
+              --generate-notes
+          fi

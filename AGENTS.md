@@ -1,0 +1,83 @@
+# AGENTS.md — Pound playbook
+
+Environment, build, release and debugging notes for humans *and* AI coding
+agents. (Companion repo to [linkport](https://github.com/butageek/linkport);
+same conventions.)
+
+## What this is
+
+Pound is a markdown reader for Windows written in Rust (eframe/egui +
+pulldown-cmark). It renders `.md` files by default and can show the raw
+source side by side (Ctrl+U). Architecture is strict MVP
+(Model–View–Presenter) — keep it that way:
+
+| Layer | File | Rule |
+|---|---|---|
+| Model | `src/model.rs` | state only, no UI types |
+| Parsing | `src/markdown.rs` | pulldown-cmark events → neutral `Block`/`Inline` tree, unit-tested headlessly |
+| Presenter | `src/presenter.rs` | intents/use-cases, owns the Model, no egui types |
+| View | `src/view.rs` | egui rendering only; forwards events to the presenter |
+| Windows glue | `src/register.rs` | HKCU registry: app-list registration + `.md` association |
+
+## Environment
+
+- Development happens on Linux/WSL; the shipped binary is Windows.
+- Windows type-checking needs the target: `rustup target add x86_64-pc-windows-msvc`
+  (or `x86_64-pc-windows-gnu` for full cross-builds — needs `mingw-w64` for
+  linking *and* the icon's windres).
+- The exe icon (`assets/pound.ico`) is regenerated with `python3 tools/gen_icon.py`
+  (stdlib only, no PIL).
+
+## Commands
+
+```bash
+cargo test                                      # unit tests (headless)
+cargo fmt --all && cargo clippy --all-targets   # keep CI green
+cargo check --target x86_64-pc-windows-msvc     # type-check Windows code
+./scripts/package.sh                            # cross-build + dist/pound-<ver>-win64.zip
+powershell -ExecutionPolicy Bypass -File tools/install.ps1 -SetDefault  # on Windows
+```
+
+## Release process
+
+1. Bump `version` in `Cargo.toml` (package.sh derives the zip name from it —
+   keep the git tag identical).
+2. Commit, then tag and push:
+   ```bash
+   git tag v0.X.Y && git push origin main --tags
+   ```
+3. `.github/workflows/release.yml` runs the tests, cross-builds the zip
+   via mingw-w64 and publishes a GitHub Release with notes generated from
+   the commits since the previous tag. Users install with the one-liner in
+   the README (the installer fetches `pound-*-win64.zip` from the latest
+   release via the GitHub API).
+
+Everyday pushes to main are preservation-only (no CI). Pull requests and
+manual dispatch run `.github/workflows/ci.yml` (fmt, clippy, tests,
+Windows cross-check).
+
+## Windows integration notes (context for `register.rs`)
+
+- Everything is HKCU-only: ProgId `Pound.md`, `.md\OpenWithProgids`,
+  `Explorer\FileExts\.md\OpenWithProgids`, `RegisteredApplications` +
+  `Software\Pound\Capabilities` (this is what puts us in the system app
+  list), then `SHChangeNotify`.
+- `--default` sets the per-user `.md` class default. Explorer's `UserChoice`
+  is hash-protected by Windows — no third-party app may set it silently;
+  if the "choose an app" dialog still appears, the user picks Pound once
+  with "Always". Platform restriction, not a bug.
+- `install.ps1` copies the exe to `%LOCALAPPDATA%\Pound`, adds a Start-menu
+  shortcut + user PATH, and calls `pound register`.
+- The binary is built with the GUI subsystem (`windows_subsystem = "windows"`);
+  CLI subcommands attach to the parent console for output.
+
+## Debugging
+
+- `pound --help` / `pound --version` print to the console (AttachConsole).
+- `pound file.md` on a headless Linux box fails in winit with
+  "neither WAYLAND_DISPLAY nor DISPLAY is set" — that is expected; use a
+  Windows machine or X server for GUI testing.
+- Registry state to inspect when file association misbehaves:
+  `HKCU\Software\Classes\.md`, `HKCU\Software\Classes\Pound.md`,
+  `HKCU\Software\RegisteredApplications`,
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.md`.
