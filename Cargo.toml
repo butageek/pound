@@ -1,6 +1,6 @@
 [package]
 name = "pound"
-version = "0.2.5"
+version = "0.1.0"
 edition = "2021"
 description = "A small markdown reader with a side-by-side source pane"
 license = "MIT"

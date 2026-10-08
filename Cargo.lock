@@ -2144,7 +2144,7 @@ dependencies = [
 
 [[package]]
 name = "pound"
-version = "0.2.5"
+version = "0.1.0"
 dependencies = [
  "ammonia",
  "image",

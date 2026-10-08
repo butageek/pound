@@ -59,8 +59,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # Idempotent: re-pushing/moving a tag updates the existing release
-          # instead of failing on the name conflict.
-          NOTES_ARGS=(--title "Pound ${GITHUB_REF_NAME}")
+          # instead of failing on the name conflict. Titles carry only the
+          # version number.
+          NOTES_ARGS=(--title "${GITHUB_REF_NAME}")
           if [ -s release-notes.md ]; then
             NOTES_ARGS+=(--notes-file release-notes.md)
           else
