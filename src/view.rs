@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use egui::{
-    CentralPanel, ColorImage, Frame, Grid, Image, Label, Layout, Margin, RichText, ScrollArea,
-    SidePanel, TextureHandle, TextureOptions, TopBottomPanel, Ui,
+    text::{LayoutJob, TextFormat},
+    CentralPanel, Color32, ColorImage, Frame, Grid, Image, Label, Layout, Margin, RichText,
+    ScrollArea, SidePanel, Stroke, TextureHandle, TextureOptions, TopBottomPanel, Ui,
 };
 
 use crate::markdown::{Block, Inline, Style};
@@ -23,6 +24,10 @@ const POLL_INTERVAL: Duration = Duration::from_millis(800);
 
 /// Font size per heading level (H1..H6).
 const HEADING_SIZES: [f32; 6] = [28.0, 22.0, 19.0, 17.0, 15.0, 14.0];
+
+/// Custom font family holding the bold weight. egui's bundled fonts only
+/// include Ubuntu-Light, so bold runs select this family instead.
+const BOLD_FAMILY: &str = "pound-bold";
 
 /// Base text style for a group of runs (heading size, quote dimming…).
 #[derive(Clone, Copy)]
@@ -64,7 +69,8 @@ pub struct AppView {
 }
 
 impl AppView {
-    pub fn new(_cc: &eframe::CreationContext<'_>, file: Option<PathBuf>) -> AppView {
+    pub fn new(cc: &eframe::CreationContext<'_>, file: Option<PathBuf>) -> AppView {
+        install_fonts(&cc.egui_ctx);
         AppView {
             presenter: Presenter::new(file.as_deref()),
             images: HashMap::new(),
@@ -72,6 +78,65 @@ impl AppView {
             last_title: "Pound".to_owned(),
             last_poll: Instant::now(),
         }
+    }
+}
+
+/// Install a real bold weight. egui's bundled proportional font is only
+/// Ubuntu-Light, and `RichText::strong()` just picks a slightly stronger
+/// COLOR — without this, `**bold**` renders identical to regular text.
+/// We ship Ubuntu-Bold (same typeface + license egui bundles) under a
+/// dedicated family that [`text_format`] selects for bold runs.
+fn install_fonts(ctx: &egui::Context) {
+    ctx.set_fonts(font_definitions());
+}
+
+fn font_definitions() -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "pound-ubuntu-bold".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../assets/fonts/Ubuntu-Bold.ttf"
+        ))),
+    );
+    fonts.families.insert(
+        egui::FontFamily::Name(BOLD_FAMILY.into()),
+        vec![
+            "pound-ubuntu-bold".to_owned(),
+            "Ubuntu-Light".to_owned(), // glyph fallback
+            "NotoEmoji-Regular".to_owned(),
+            "emoji-icon-font".to_owned(),
+        ],
+    );
+    fonts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Headless smoke test: the bundled Ubuntu-Bold parses through egui's
+    /// font stack and bold-family text lays out to a non-empty galley.
+    #[test]
+    fn bold_font_lays_out() {
+        let fonts = egui::text::Fonts::new(
+            1.0,
+            8192,
+            egui::epaint::AlphaFromCoverage::LIGHT_MODE_DEFAULT,
+            font_definitions(),
+        );
+
+        let mut job = LayoutJob::default();
+        job.append(
+            "bold text",
+            0.0,
+            TextFormat {
+                font_id: egui::FontId::new(14.0, egui::FontFamily::Name(BOLD_FAMILY.into())),
+                ..Default::default()
+            },
+        );
+        let galley = fonts.layout_job(job);
+        assert!(galley.size().x > 0.0, "bold galley should have width");
+        assert!(galley.size().y > 0.0, "bold galley should have height");
     }
 }
 
@@ -287,13 +352,13 @@ fn render_blocks(
                     strong: true,
                     weak: base.weak,
                 };
-                ui.add_space(8.0);
+                ui.add_space(10.0);
                 ui.horizontal_wrapped(|ui| render_inlines(ui, inlines, heading_base, rc));
-                ui.add_space(2.0);
+                ui.add_space(4.0);
             }
             Block::Paragraph(inlines) => {
                 ui.horizontal_wrapped(|ui| render_inlines(ui, inlines, base, rc));
-                ui.add_space(5.0);
+                ui.add_space(8.0);
             }
             Block::Code { lang, text } => render_code(ui, lang.as_deref(), text, false),
             Block::Html(text) => render_code(ui, Some("html"), text, true),
@@ -341,7 +406,8 @@ fn render_list(
             (None, Some(_)) => format!("{number}. "),
             (None, None) => "•  ".to_owned(),
         };
-        let marker_label = RichText::new(marker).strong();
+        // List markers are regular weight (like most markdown renderers).
+        let marker_label = marker;
 
         // Common case: a single-paragraph item renders inline with its marker.
         let inline = item.blocks.len() == 1 && matches!(item.blocks[0], Block::Paragraph(_));
@@ -439,44 +505,113 @@ fn render_code(ui: &mut Ui, lang: Option<&str>, text: &str, dim: bool) {
 }
 
 fn render_inlines(ui: &mut Ui, inlines: &[Inline], base: TextBase, rc: &mut RenderCtx<'_>) {
+    // Runs are laid out in a single rich-text galley per contiguous segment
+    // (split only around images, which cannot live inside a galley). This
+    // gives proper word spacing, line height, and inline link hit-testing.
+    let mut job = make_job(ui);
+    let mut links: Vec<(std::ops::Range<usize>, String)> = Vec::new();
     for inline in inlines {
         match inline {
-            Inline::Run { text, style } => render_run(ui, text, style, base, rc),
-            Inline::Image { alt, url } => render_image(ui, alt, url, rc),
+            Inline::Run { text, style } => {
+                // Link spans are tracked in CHARACTER offsets, which is what
+                // `CCursor.index` uses for galley hit-testing.
+                let start_chars = job.text.chars().count();
+                job.append(text.as_str(), 0.0, text_format(ui, base, style));
+                if let Some(url) = &style.link {
+                    links.push((start_chars..job.text.chars().count(), url.clone()));
+                }
+            }
+            Inline::Image { alt, url } => {
+                render_text_job(ui, std::mem::take(&mut job), std::mem::take(&mut links), rc);
+                render_image(ui, alt, url, rc);
+            }
         }
+    }
+    render_text_job(ui, job, links, rc);
+}
+
+fn make_job(ui: &Ui) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    job.wrap.max_width = ui.available_width();
+    job
+}
+
+/// Lay out one text segment, paint it, and open any clicked link span.
+fn render_text_job(
+    ui: &mut Ui,
+    job: LayoutJob,
+    links: Vec<(std::ops::Range<usize>, String)>,
+    rc: &mut RenderCtx<'_>,
+) {
+    if job.text.is_empty() {
+        return;
+    }
+    let galley = ui.ctx().fonts(|fonts| fonts.layout_job(job));
+    let (rect, response) = ui.allocate_exact_size(galley.size(), egui::Sense::click());
+    ui.painter()
+        .galley(rect.min, galley.clone(), ui.visuals().text_color());
+    if response.clicked() {
+        if let Some(pointer) = response.interact_pointer_pos() {
+            let char_index = galley.cursor_from_pos(pointer - rect.min).index;
+            if let Some((_, url)) = links.iter().find(|(range, _)| range.contains(&char_index)) {
+                rc.push_link(url);
+            }
+        }
+    }
+    if !links.is_empty() {
+        // Pointing hand over paragraphs that contain links.
+        response.on_hover_cursor(egui::CursorIcon::PointingHand);
     }
 }
 
-fn render_run(ui: &mut Ui, text: &str, style: &Style, base: TextBase, rc: &mut RenderCtx<'_>) {
-    if let Some(url) = &style.link {
-        if ui.link(text).clicked() {
-            rc.push_link(url);
-        }
-        return;
-    }
-
-    let mut rich = RichText::new(text);
-    if let Some(size) = base.size {
-        rich = rich.size(size);
-    }
-    if base.strong || style.bold {
-        rich = rich.strong();
-    }
-    if style.italic {
-        rich = rich.italics();
-    }
+fn text_format(ui: &Ui, base: TextBase, style: &Style) -> TextFormat {
+    let size = base
+        .size
+        .unwrap_or_else(|| ui.text_style_height(&egui::TextStyle::Body));
+    let bold = base.strong || style.bold;
+    let family = if style.code {
+        egui::FontFamily::Monospace
+    } else if bold {
+        egui::FontFamily::Name(BOLD_FAMILY.into())
+    } else {
+        egui::FontFamily::Proportional
+    };
+    let visuals = ui.visuals();
+    let color = if base.weak {
+        visuals.weak_text_color()
+    } else {
+        visuals.text_color()
+    };
+    // Roomier line height for body text (headings stay tighter), similar to
+    // typical web markdown rendering.
+    let line_height = if base.size.is_some() {
+        size * 1.3
+    } else {
+        size * 1.5
+    };
+    let mut format = TextFormat {
+        font_id: egui::FontId::new(size, family),
+        line_height: Some(line_height),
+        color,
+        background: if style.code {
+            visuals.code_bg_color
+        } else {
+            Color32::TRANSPARENT
+        },
+        italics: style.italic,
+        ..Default::default()
+    };
     if style.strike {
-        rich = rich.strikethrough();
+        format.strikethrough = Stroke::new(1.0_f32, color);
     }
-    if style.code {
-        rich = rich
-            .monospace()
-            .background_color(ui.visuals().code_bg_color);
+    if style.underline {
+        format.underline = Stroke::new(1.0_f32, color);
     }
-    if base.weak {
-        rich = rich.weak();
+    if style.link.is_some() {
+        format.color = visuals.hyperlink_color;
+        format.underline = Stroke::new(1.0_f32, visuals.hyperlink_color);
     }
-    ui.label(rich);
+    format
 }
 
 /// Render an image reference. Only local files are supported for now;

@@ -50,8 +50,10 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
 - **Rendered view by default**, with a **Source toggle** that opens a
   side-by-side panel showing the raw markdown (resizable, monospaced).
   Shortcut: `Ctrl+U`.
-- Headings, emphasis, inline code, code blocks (with copy button), lists,
-  task lists, blockquotes, tables, rules, links (opened in your browser).
+- Headings, emphasis, **real bold weight**, inline code, code blocks (with
+  copy button), lists, task lists, blockquotes, tables, rules, links
+  (opened in your browser), and inline HTML formatting
+  (`<b>`, `<strong>`, `<em>`, `<u>`, `<s>`, `<code>`, `<br>`).
 - Local images referenced from a document are rendered.
 - Auto-reloads when the file changes on disk.
 - Installs per-user — **no admin rights required**.

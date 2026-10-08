@@ -12,6 +12,7 @@ pub struct Style {
     pub bold: bool,
     pub italic: bool,
     pub strike: bool,
+    pub underline: bool,
     pub code: bool,
     /// When set, this run should be rendered as a hyperlink to this URL.
     pub link: Option<String>,
@@ -137,6 +138,45 @@ impl Builder {
         }
     }
 
+    /// Map a raw inline-HTML fragment onto style flags: the common
+    /// formatting tags (`<b>`, `<em>`, `<u>`, `<s>`, `<code>`, …) toggle the
+    /// matching flag, `<br>` is a hard break, everything else is ignored.
+    fn inline_html_tag(&mut self, html: &str) {
+        let trimmed = html.trim();
+        if trimmed.len() < 3 || !trimmed.starts_with('<') || !trimmed.ends_with('>') {
+            return;
+        }
+        if let Some(rest) = trimmed.strip_prefix("</") {
+            // Closing tag: </name>
+            let name = rest.trim_end_matches('>').trim();
+            match name.to_ascii_lowercase().as_str() {
+                "b" | "strong" => self.style.bold = false,
+                "i" | "em" => self.style.italic = false,
+                "u" | "ins" => self.style.underline = false,
+                "s" | "del" | "strike" | "strikethrough" => self.style.strike = false,
+                "code" => self.style.code = false,
+                _ => {}
+            }
+            return;
+        }
+        // Opening tag: <name> / <name attr="…"> / <br/> — attributes ignored.
+        let inner = &trimmed[1..trimmed.len() - 1];
+        let name = inner
+            .split(|c: char| c.is_whitespace() || c == '/')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        match name.as_str() {
+            "b" | "strong" => self.style.bold = true,
+            "i" | "em" => self.style.italic = true,
+            "u" | "ins" => self.style.underline = true,
+            "s" | "del" | "strike" | "strikethrough" => self.style.strike = true,
+            "code" => self.style.code = true,
+            "br" => self.text("\n"),
+            _ => {}
+        }
+    }
+
     fn code_span(&mut self, code: &str) {
         if let Some((_, alt)) = &mut self.image {
             alt.push_str(code);
@@ -175,6 +215,8 @@ impl Builder {
                     html.push_str(&h);
                 } else if let Some((_, buf)) = &mut self.code {
                     buf.push_str(&h);
+                } else {
+                    self.inline_html_tag(&h);
                 }
             }
             _ => {}
@@ -512,6 +554,69 @@ mod tests {
         match &blocks[0] {
             Block::Quote(inner) => assert_eq!(inner.len(), 1),
             other => panic!("expected quote, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inline_html_formatting_tags() {
+        let blocks = run("<b>bold</b> <i>it</i> <u>und</u> <s>gone</s> <code>x</code>");
+        let Block::Paragraph(inlines) = &blocks[0] else {
+            panic!("expected paragraph, got {:?}", blocks[0])
+        };
+        // styled runs separated by plain-space runs
+        assert_eq!(inlines.len(), 9);
+        let runs: Vec<&Inline> = inlines.iter().step_by(2).collect();
+        let expected = [
+            ("bold", true, false, false, false),
+            ("it", false, true, false, false),
+            ("und", false, false, true, false),
+            ("gone", false, false, false, true),
+            ("x", false, false, false, false),
+        ];
+        for (run, (text, bold, italic, underline, strike)) in runs.iter().zip(expected) {
+            let Inline::Run { text: got, style } = run else {
+                panic!("expected run, got {run:?}")
+            };
+            assert_eq!(got, text);
+            assert_eq!(style.bold, bold, "bold of {text}");
+            assert_eq!(style.italic, italic, "italic of {text}");
+            assert_eq!(style.underline, underline, "underline of {text}");
+            assert_eq!(style.strike, strike, "strike of {text}");
+        }
+        if let Inline::Run { style, .. } = runs[4] {
+            assert!(style.code);
+        }
+    }
+
+    #[test]
+    fn br_tag_is_a_hard_break() {
+        let blocks = run("line one<br>line two");
+        let Block::Paragraph(inlines) = &blocks[0] else {
+            panic!("expected paragraph")
+        };
+        assert_eq!(inlines.len(), 3);
+        assert_eq!(
+            inlines[1],
+            Inline::Run {
+                text: "\n".to_owned(),
+                style: Style::default()
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_inline_html_is_dropped() {
+        let blocks = run("<span class=\"a\">kept</span>");
+        let Block::Paragraph(inlines) = &blocks[0] else {
+            panic!("expected paragraph")
+        };
+        assert_eq!(inlines.len(), 1);
+        match &inlines[0] {
+            Inline::Run { text, style } => {
+                assert_eq!(text, "kept");
+                assert_eq!(*style, Style::default());
+            }
+            other => panic!("expected run, got {other:?}"),
         }
     }
 }

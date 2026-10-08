@@ -28,6 +28,19 @@ source side by side (Ctrl+U). Architecture is strict MVP
 - The exe icon (`assets/pound.ico`) is regenerated with `python3 tools/gen_icon.py`
   (stdlib only, no PIL).
 
+## Rendering notes
+
+- egui's bundled fonts have **no bold weight** and `RichText::strong()` only
+  strengthens the COLOR. Real bold comes from `assets/fonts/Ubuntu-Bold.ttf`,
+  installed under the `pound-bold` family (`install_fonts` in `view.rs`) and
+  selected via `FontId` in `text_format`.
+- Inline text renders as one `LayoutJob` galley per paragraph (word spacing,
+  `line_height`, inline code backgrounds, underline/strike); links are
+  hit-tested via `cursor_from_pos(...).index` — a CHARACTER offset, so link
+  spans are tracked in chars, not bytes.
+- `markdown.rs` maps common inline-HTML formatting tags onto style flags
+  (`inline_html_tag`); unknown tags are ignored, `<br>` is a hard break.
+
 ## Commands
 
 ```bash
