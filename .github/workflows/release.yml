@@ -1,9 +1,15 @@
-# Release: pushing a version tag (v0.1.0) cross-builds the Windows zip via
+# Release: pushing a version tag (v0.2.1) builds the Windows zip via
 # scripts/package.sh and publishes it as a GitHub Release with notes
 # generated from the commits since the previous tag (this repo pushes
 # directly to main, so GitHub's PR-based --generate-notes comes up empty).
 # End users install with the irm one-liner in the README; tools/install.ps1
 # fetches pound-<version>-win64.zip from the latest release.
+#
+# Built on windows-latest with the MSVC toolchain: WebView2Loader is linked
+# STATICALLY on MSVC. The mingw (windows-gnu) cross-build imports
+# WebView2Loader.dll dynamically (mingw cannot link Microsoft's static lib),
+# which made v0.2.0 die at startup with STATUS_DLL_NOT_FOUND (0xC0000135)
+# on machines without the DLL next to the exe.
 
 name: Release
 
@@ -16,7 +22,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
         with:
@@ -24,18 +30,17 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-gnu
-
-      - name: Install mingw-w64 (windows-gnu cross-linking + icon windres)
-        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+          targets: x86_64-pc-windows-msvc
 
       - name: Unit tests
         run: cargo test
 
       - name: Build release zip (pound.exe + QUICK-START + LICENSE)
+        shell: bash
         run: ./scripts/package.sh
 
       - name: Compose release notes from commits since the previous tag
+        shell: bash
         run: |
           PREV="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
           if [ -n "$PREV" ]; then
@@ -49,6 +54,7 @@ jobs:
           fi
 
       - name: Create (or update) the GitHub Release with the zip attached
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

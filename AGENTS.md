@@ -25,8 +25,14 @@ source side by side (Ctrl+U). Architecture is strict MVP
   (tao/wry/rfd) is `[target.'cfg(windows)'.dependencies]`-gated, so Linux
   hosts run `cargo test` only and cannot open the GUI.
 - Windows type-checking needs the target: `rustup target add x86_64-pc-windows-msvc`
-  (or `x86_64-pc-windows-gnu` for full cross-builds — needs `mingw-w64` for
-  linking *and* the icon's windres). WebView2 ships with Windows 10/11.
+  (a plain `cargo check --target` needs no linker; the icon is only embedded
+  in real builds). WebView2 ships with Windows 10/11.
+- **Release builds use MSVC** (CI builds on `windows-latest`; locally needs
+  VS Build Tools). NEVER build releases with windows-gnu/mingw: mingw cannot
+  link Microsoft's static WebView2Loader lib, so the exe imports
+  `WebView2Loader.dll` dynamically and dies at startup with
+  STATUS_DLL_NOT_FOUND (0xC0000135) on user machines — this shipped as
+  v0.2.0 and is why the release runner is MSVC.
 - The exe icon (`assets/pound.ico`, window icon `assets/pound.png`) is
   regenerated with `python3 tools/gen_icon.py` (stdlib only, no PIL).
 

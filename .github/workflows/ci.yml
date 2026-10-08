@@ -1,5 +1,5 @@
 # Continuous integration: format check, clippy, unit tests and the Windows
-# cross-compile check.
+# type-check.
 #
 # Deliberately NOT triggered by everyday pushes (those are for preservation
 # only) — run on demand with `gh workflow run CI.yml` or the Actions tab's
@@ -24,11 +24,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-gnu
+          targets: x86_64-pc-windows-msvc
           components: rustfmt, clippy
-
-      - name: Install mingw-w64 (windows-gnu cross-checking + icon windres)
-        run: sudo apt-get update && sudo apt-get install -y mingw-w64
 
       - name: Format check
         run: cargo fmt --all --check
@@ -39,5 +36,8 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # Type-check the Windows GUI code (the shipped toolchain is MSVC).
+      # No linker or resource compiler is needed for a check; the icon is
+      # only embedded in real builds.
       - name: Windows target check
-        run: cargo check --target x86_64-pc-windows-gnu --all-targets
+        run: cargo check --target x86_64-pc-windows-msvc --all-targets

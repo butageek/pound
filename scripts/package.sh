@@ -3,14 +3,18 @@
 #   dist/pound-<version>-win64.zip
 #   └─ pound-<version>-win64/ { pound.exe, QUICK-START.txt, LICENSE }
 #
-# Cross-compiles from Linux (needs the x86_64-pc-windows-gnu rust target and
-# mingw-w64). CI runs this on v* tags; recipients follow QUICK-START.txt.
-# Expect SmartScreen to warn on the unsigned exe ("More info" > "Run anyway").
+# CI (release.yml) runs this on a windows-latest runner with the MSVC
+# toolchain, which links WebView2Loader STATICALLY. Do not build releases
+# with windows-gnu/mingw: it imports WebView2Loader.dll dynamically and the
+# app dies at startup with STATUS_DLL_NOT_FOUND on user machines.
+#
+# Locally on Windows (VS Build Tools + rustup msvc):
+#   ./scripts/package.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+TARGET="${1:-x86_64-pc-windows-msvc}"
 VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
-TARGET=x86_64-pc-windows-gnu
 TARGET_DIR="target/$TARGET/release"
 STAGE="dist/pound-$VERSION-win64"
 
@@ -23,10 +27,11 @@ cp "$TARGET_DIR/pound.exe" "$STAGE/"
 cp resources/quick-start.txt "$STAGE/QUICK-START.txt"
 cp LICENSE "$STAGE/"
 
-# No `zip` in a default WSL install; python3's zipfile is always there.
-# (Concatenate the name — with_suffix would mangle the dotted version.)
+# `zip` is not everywhere; python's zipfile is. Windows runners expose
+# `python`, Unix hosts `python3`.
+PY="$(command -v python3 || command -v python)"
 rm -f "$STAGE.zip"
-python3 - "$STAGE" <<'EOF'
+"$PY" - "$STAGE" <<'EOF'
 import pathlib, sys, zipfile
 
 stage = pathlib.Path(sys.argv[1])

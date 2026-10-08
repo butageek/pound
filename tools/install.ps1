@@ -177,6 +177,14 @@ New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 $targetExe = Join-Path $InstallDir 'pound.exe'
 Stop-PoundProcesses -ExePath $targetExe
 Copy-Item -Path $BinaryPath -Destination $targetExe -Force
+# Future-proofing: if a release ever ships helper DLLs next to pound.exe,
+# bring them along (MSVC builds link everything statically today).
+$binDir = Split-Path -Parent $BinaryPath
+if ($binDir) {
+    Get-ChildItem -Path $binDir -Filter '*.dll' -ErrorAction SilentlyContinue | ForEach-Object {
+        Copy-Item -Path $_.FullName -Destination $InstallDir -Force
+    }
+}
 
 # Start Menu shortcut (puts Pound in the system app list for the Start menu).
 Write-Step 'Creating Start Menu shortcut'
