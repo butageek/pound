@@ -1,29 +1,31 @@
 [package]
 name = "pound"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2021"
 description = "A small markdown reader with a side-by-side source pane"
 license = "MIT"
 authors = ["Hendry Chou"]
 repository = "https://github.com/butageek/pound"
 readme = "README.md"
-keywords = ["markdown", "reader", "windows", "egui"]
+keywords = ["markdown", "reader", "windows", "webview"]
 categories = ["text-processing", "gui"]
 
 [dependencies]
-eframe = "0.32"
 pulldown-cmark = "0.13"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+ammonia = "4"
 open = "5"
 
 [target.'cfg(windows)'.dependencies]
+tao = "0.37"
+wry = "0.57"
+rfd = "0.15"
 winreg = "0.55"
 windows-sys = { version = "0.60", features = [
     "Win32_UI_Shell",
     "Win32_System_Console",
     "Win32_Storage_FileSystem",
 ] }
-rfd = "0.15"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [build-dependencies]
 winresource = "0.1"

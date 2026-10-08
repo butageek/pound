@@ -1,802 +1,498 @@
-//! View layer: egui/eframe rendering.
+//! View layer: the WebView2 shell (Windows).
 //!
-//! The view is intentionally "dumb": it renders the model's state and
-//! forwards user intents (open file, toggle source, click link…) to the
-//! presenter. No document logic lives here.
+//! The markdown pane is an embedded WebView2 (via `wry`) showing HTML+CSS —
+//! the same class of browser engine VSCode's markdown preview uses, which
+//! is what makes its rendering quality possible. Rust keeps the MVP core:
+//! the presenter owns the document; the webview only displays it.
+//!
+//! - Rust -> JS: `webview.evaluate_script` pushes rendered HTML, source
+//!   text, title and errors as JSON-escaped strings.
+//! - JS -> Rust: the toolbar navigates to `pound://…` URLs, which the
+//!   navigation handler intercepts and turns into presenter intents.
+//! - Local images are served through the `poundimg://` custom protocol
+//!   (like ColaMD's portable file:// image mapping).
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use eframe::egui;
-use egui::{
-    text::{LayoutJob, TextFormat},
-    CentralPanel, Color32, ColorImage, Frame, Image, Label, Layout, Margin, RichText, ScrollArea,
-    SidePanel, Stroke, TextureHandle, TextureOptions, TopBottomPanel, Ui,
-};
+use tao::dpi::LogicalSize;
+use tao::event::{Event, WindowEvent};
+use tao::event_loop::{ControlFlow, EventLoop};
+use tao::window::WindowBuilder;
+use wry::{http, WebView, WebViewBuilder};
 
-use crate::markdown::{Block, Inline, Style};
-use crate::model::Document;
 use crate::presenter::Presenter;
 
 /// How often to check the document for on-disk changes.
 const POLL_INTERVAL: Duration = Duration::from_millis(800);
 
-/// Font size per heading level (H1..H6).
-const HEADING_SIZES: [f32; 6] = [28.0, 22.0, 19.0, 17.0, 15.0, 14.0];
+pub fn run(file: Option<PathBuf>) {
+    let event_loop = EventLoop::new();
+    let window = WindowBuilder::new()
+        .with_title("Pound")
+        .with_inner_size(LogicalSize::new(1120.0, 760.0))
+        .with_min_inner_size(LogicalSize::new(560.0, 400.0))
+        .with_window_icon(window_icon())
+        .build(&event_loop)
+        .expect("create window");
 
-/// Custom font family holding the bold weight. egui's bundled fonts only
-/// include Ubuntu-Light, so bold runs select this family instead.
-const BOLD_FAMILY: &str = "pound-bold";
+    let shared = Rc::new(RefCell::new(Presenter::new(file.as_deref())));
+    let dirty = Rc::new(Cell::new(false));
 
-/// Table cell padding and column sizing (points).
-const CELL_PAD_X: f32 = 10.0;
-const CELL_PAD_Y: f32 = 5.0;
-const MIN_COL_WIDTH: f32 = 40.0;
+    let builder = WebViewBuilder::new()
+        .with_html(SHELL_HTML)
+        .with_devtools(cfg!(debug_assertions))
+        .with_custom_protocol("poundimg".into(), |_id, request| serve_local_image(request));
 
-/// Base text style for a group of runs (heading size, quote dimming…).
-#[derive(Clone, Copy)]
-struct TextBase {
-    size: Option<f32>,
-    strong: bool,
-    weak: bool,
-}
+    let nav_presenter = shared.clone();
+    let nav_dirty = dirty.clone();
+    let webview = builder
+        .with_navigation_handler(move |url| {
+            handle_navigation(&url, &mut nav_presenter.borrow_mut(), &nav_dirty)
+        })
+        .build(&window)
+        .expect("create webview");
 
-const BODY: TextBase = TextBase {
-    size: None,
-    strong: false,
-    weak: false,
-};
+    // Paint whatever the initial file (if any) produced.
+    push_document(&webview, &shared.borrow());
+    apply_title(&window, &shared.borrow());
 
-/// Mutable state shared by the render helpers for one frame.
-struct RenderCtx<'a> {
-    doc_dir: &'a Path,
-    images: &'a mut HashMap<String, TextureHandle>,
-    clicked_links: Vec<String>,
-    list_counter: u32,
-}
+    let mut last_pushed = shared.borrow().model.revision;
+    let mut last_title = current_title(&shared.borrow());
+    let mut last_poll = Instant::now();
 
-impl<'a> RenderCtx<'a> {
-    fn push_link(&mut self, url: &str) {
-        self.clicked_links.push(url.to_owned());
-    }
-}
+    event_loop.run(move |event, _, control_flow| {
+        // Wake up periodically for the file-change poll.
+        *control_flow = ControlFlow::WaitUntil(Instant::now() + POLL_INTERVAL);
 
-pub struct AppView {
-    presenter: Presenter,
-    /// Decoded image textures, keyed by resolved file path.
-    images: HashMap<String, TextureHandle>,
-    /// Model revision the texture cache belongs to.
-    cached_revision: u64,
-    last_title: String,
-    last_poll: Instant,
-}
+        match event {
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => *control_flow = ControlFlow::Exit,
 
-impl AppView {
-    pub fn new(cc: &eframe::CreationContext<'_>, file: Option<PathBuf>) -> AppView {
-        install_fonts(&cc.egui_ctx);
-        AppView {
-            presenter: Presenter::new(file.as_deref()),
-            images: HashMap::new(),
-            cached_revision: 0,
-            last_title: "Pound".to_owned(),
-            last_poll: Instant::now(),
-        }
-    }
-}
+            Event::WindowEvent {
+                event: WindowEvent::DroppedFile(path),
+                ..
+            } => {
+                shared.borrow_mut().open_dropped(&[path]);
+                dirty.set(true);
+            }
 
-/// Install the reading fonts. On Windows we prefer the system sans-serif
-/// — **Segoe UI** (the same font VSCode's markdown preview uses on
-/// Windows), with its true bold weight, plus Consolas for code. These are
-/// loaded from the OS at runtime and never redistributed with the app.
-/// Elsewhere (Linux dev machines) we fall back to egui's defaults plus a
-/// bundled Ubuntu-Bold so real bold still renders.
-fn install_fonts(ctx: &egui::Context) {
-    ctx.set_fonts(font_definitions());
-}
-
-/// Load a font that ships with Windows (e.g. `segoeui.ttf`) from the system
-/// fonts directory. Returns `None` when unavailable (non-Windows or odd
-/// installs) so callers can fall back.
-fn load_system_font(name: &str) -> Option<Vec<u8>> {
-    let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".to_owned());
-    std::fs::read(format!(r"{windir}\Fonts\{name}")).ok()
-}
-
-fn font_definitions() -> egui::FontDefinitions {
-    let mut fonts = egui::FontDefinitions::default();
-
-    match (
-        load_system_font("segoeui.ttf"),
-        load_system_font("segoeuib.ttf"),
-    ) {
-        (Some(regular), Some(bold)) => {
-            fonts.font_data.insert(
-                "segoe-ui".to_owned(),
-                std::sync::Arc::new(egui::FontData::from_owned(regular)),
-            );
-            fonts.font_data.insert(
-                "segoe-ui-bold".to_owned(),
-                std::sync::Arc::new(egui::FontData::from_owned(bold)),
-            );
-            fonts.families.insert(
-                egui::FontFamily::Proportional,
-                vec![
-                    "segoe-ui".to_owned(),
-                    "NotoEmoji-Regular".to_owned(),
-                    "emoji-icon-font".to_owned(),
-                ],
-            );
-            fonts.families.insert(
-                egui::FontFamily::Name(BOLD_FAMILY.into()),
-                vec![
-                    "segoe-ui-bold".to_owned(),
-                    "segoe-ui".to_owned(), // glyph fallback
-                    "NotoEmoji-Regular".to_owned(),
-                    "emoji-icon-font".to_owned(),
-                ],
-            );
-            if let Some(consolas) = load_system_font("consola.ttf") {
-                fonts.font_data.insert(
-                    "consolas".to_owned(),
-                    std::sync::Arc::new(egui::FontData::from_owned(consolas)),
-                );
-                if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-                    mono.insert(0, "consolas".to_owned());
+            Event::MainEventsCleared => {
+                if last_poll.elapsed() >= POLL_INTERVAL {
+                    last_poll = Instant::now();
+                    shared.borrow_mut().reload_if_changed();
                 }
-            }
-        }
-        _ => {
-            // Fallback: egui's default Ubuntu-Light plus the bundled
-            // Ubuntu-Bold (same typeface + license) for real bold.
-            fonts.font_data.insert(
-                "pound-ubuntu-bold".to_owned(),
-                std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
-                    "../assets/fonts/Ubuntu-Bold.ttf"
-                ))),
-            );
-            fonts.families.insert(
-                egui::FontFamily::Name(BOLD_FAMILY.into()),
-                vec![
-                    "pound-ubuntu-bold".to_owned(),
-                    "Ubuntu-Light".to_owned(), // glyph fallback
-                    "NotoEmoji-Regular".to_owned(),
-                    "emoji-icon-font".to_owned(),
-                ],
-            );
-        }
-    }
-    fonts
-}
-
-impl eframe::App for AppView {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // --- input: drag & drop + external file changes --------------------
-        // Ctrl+U toggles the source pane (like browser "view source").
-        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::U)) {
-            self.presenter.toggle_source();
-        }
-        let dropped: Vec<PathBuf> = ctx.input(|i| {
-            i.raw
-                .dropped_files
-                .iter()
-                .filter_map(|d| d.path.clone())
-                .collect()
-        });
-        if !dropped.is_empty() {
-            self.presenter.open_dropped(&dropped);
-        }
-        if self.last_poll.elapsed() >= POLL_INTERVAL {
-            self.last_poll = Instant::now();
-            self.presenter.reload_if_changed();
-        }
-        ctx.request_repaint_after(POLL_INTERVAL);
-
-        // Invalidate the image cache when a new document revision appears.
-        if self.presenter.model.revision != self.cached_revision {
-            self.cached_revision = self.presenter.model.revision;
-            self.images.clear();
-        }
-
-        // Keep the window title in sync with the document.
-        let want_title = match &self.presenter.model.document {
-            Some(doc) => format!("{} — Pound", doc.name()),
-            None => "Pound".to_owned(),
-        };
-        if want_title != self.last_title {
-            self.last_title = want_title.clone();
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title(want_title));
-        }
-
-        // Split borrows so the render helpers can use the document and the
-        // texture cache at the same time.
-        let AppView {
-            presenter, images, ..
-        } = self;
-
-        TopBottomPanel::top("top_bar").show(ctx, |ui| top_bar(ui, presenter));
-
-        if presenter.model.show_source {
-            let width = ctx.screen_rect().width() * 0.42;
-            SidePanel::right("source_panel")
-                .resizable(true)
-                .default_width(width)
-                .show(ctx, |ui| source_panel(ui, &presenter.model));
-        }
-
-        CentralPanel::default().show(ctx, |ui| {
-            Frame::default()
-                .inner_margin(Margin::symmetric(16, 10))
-                .show(ui, |ui| {
-                    ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            if let Some(error) = presenter.model.error.clone() {
-                                error_banner(ui, presenter, &error);
-                            }
-                            if presenter.model.document.is_some() {
-                                let doc = presenter.model.document.as_ref().expect("checked above");
-                                let dir = doc.dir();
-                                let mut rc = RenderCtx {
-                                    doc_dir: &dir,
-                                    images,
-                                    clicked_links: Vec::new(),
-                                    list_counter: 0,
-                                };
-                                render_blocks(ui, doc, &doc.blocks, BODY, &mut rc);
-                                for url in rc.clicked_links {
-                                    presenter.open_link(&url);
-                                }
-                            } else {
-                                welcome(ui, presenter);
-                            }
-                        });
-                });
-        });
-    }
-}
-
-// ---------------------------------------------------------------------------
-// chrome (top bar, source panel, banners, welcome screen)
-// ---------------------------------------------------------------------------
-
-fn top_bar(ui: &mut Ui, presenter: &mut Presenter) {
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.strong("Pound");
-        ui.separator();
-
-        #[cfg(windows)]
-        if ui.button("Open…").clicked() {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("Markdown", &["md", "markdown"])
-                .pick_file()
-            {
-                presenter.open_path(&path);
-            }
-        }
-
-        if presenter.model.document.is_some() && ui.button("Reload").clicked() {
-            presenter.reload();
-        }
-
-        ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-            let mut show_source = presenter.model.show_source;
-            if ui.checkbox(&mut show_source, "Source").changed() {
-                presenter.set_show_source(show_source);
-            }
-            if let Some(doc) = &presenter.model.document {
-                ui.weak(doc.path.display().to_string())
-                    .on_hover_text("Full path of the open document");
-            }
-        });
-    });
-    ui.add_space(3.0);
-}
-
-fn source_panel(ui: &mut Ui, model: &crate::model::Model) {
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.strong("Source");
-        if let Some(doc) = &model.document {
-            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.weak(doc.path.display().to_string());
-            });
-        }
-    });
-    ui.separator();
-    if let Some(doc) = &model.document {
-        ScrollArea::both()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                ui.add(Label::new(RichText::new(&doc.source).monospace()).selectable(true));
-            });
-    } else {
-        ui.weak("No document open.");
-    }
-}
-
-fn error_banner(ui: &mut Ui, presenter: &mut Presenter, error: &str) {
-    Frame::default()
-        .fill(ui.visuals().error_fg_color.gamma_multiply(0.12))
-        .inner_margin(Margin::same(8))
-        .corner_radius(4)
-        .show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.colored_label(ui.visuals().error_fg_color, "⚠");
-                ui.colored_label(ui.visuals().error_fg_color, error);
-                if ui.small_button("Dismiss").clicked() {
-                    presenter.dismiss_error();
-                }
-            });
-        });
-    ui.add_space(6.0);
-}
-
-fn welcome(ui: &mut Ui, presenter: &mut Presenter) {
-    let _ = presenter; // used by the Windows-only file dialog below
-    ui.vertical_centered(|ui| {
-        ui.add_space(ui.available_height() * 0.28);
-        ui.heading("Pound");
-        ui.label("A tiny markdown reader.");
-        ui.add_space(12.0);
-
-        #[cfg(windows)]
-        if ui.button("Open a markdown file…").clicked() {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("Markdown", &["md", "markdown"])
-                .pick_file()
-            {
-                presenter.open_path(&path);
-            }
-        }
-
-        ui.add_space(8.0);
-        ui.weak("…or drop a .md file anywhere in this window.");
-        ui.weak("From a terminal:  pound path/to/file.md");
-        #[cfg(windows)]
-        ui.weak("Register as the .md app:  pound register --default");
-    });
-}
-
-// ---------------------------------------------------------------------------
-// document rendering
-// ---------------------------------------------------------------------------
-
-fn render_blocks(
-    ui: &mut Ui,
-    doc: &Document,
-    blocks: &[Block],
-    base: TextBase,
-    rc: &mut RenderCtx<'_>,
-) {
-    for block in blocks {
-        match block {
-            Block::Heading { level, inlines } => {
-                let size = HEADING_SIZES[(level.saturating_sub(1) as usize).min(5)];
-                let heading_base = TextBase {
-                    size: Some(size),
-                    strong: true,
-                    weak: base.weak,
-                };
-                ui.add_space(10.0);
-                ui.horizontal_wrapped(|ui| render_inlines(ui, inlines, heading_base, rc));
-                ui.add_space(4.0);
-            }
-            Block::Paragraph(inlines) => {
-                ui.horizontal_wrapped(|ui| render_inlines(ui, inlines, base, rc));
-                ui.add_space(8.0);
-            }
-            Block::Code { lang, text } => render_code(ui, lang.as_deref(), text, false),
-            Block::Html(text) => render_code(ui, Some("html"), text, true),
-            Block::Quote(blocks) => {
-                let fill = ui.visuals().faint_bg_color;
-                Frame::default()
-                    .fill(fill)
-                    .inner_margin(Margin {
-                        left: 12,
-                        right: 8,
-                        top: 6,
-                        bottom: 6,
-                    })
-                    .corner_radius(4)
-                    .show(ui, |ui| {
-                        let quote_base = TextBase { weak: true, ..base };
-                        render_blocks(ui, doc, blocks, quote_base, rc);
-                    });
-                ui.add_space(6.0);
-            }
-            Block::List { start, items } => render_list(ui, doc, items, *start, base, rc),
-            Block::Rule => {
-                ui.add_space(4.0);
-                ui.separator();
-                ui.add_space(4.0);
-            }
-            Block::Table { head, rows } => render_table(ui, head, rows, base, rc),
-        }
-    }
-}
-
-fn render_list(
-    ui: &mut Ui,
-    doc: &Document,
-    items: &[crate::markdown::Item],
-    start: Option<u64>,
-    base: TextBase,
-    rc: &mut RenderCtx<'_>,
-) {
-    let mut number = start.unwrap_or(1);
-    for item in items {
-        let marker = match (item.task, start) {
-            (Some(true), _) => "☑".to_owned(),
-            (Some(false), _) => "☐".to_owned(),
-            (None, Some(_)) => format!("{number}. "),
-            (None, None) => "•  ".to_owned(),
-        };
-        // List markers are regular weight (like most markdown renderers).
-        let marker_label = marker;
-
-        // Common case: a single-paragraph item renders inline with its marker.
-        let inline = item.blocks.len() == 1 && matches!(item.blocks[0], Block::Paragraph(_));
-
-        if inline {
-            let Block::Paragraph(inlines) = &item.blocks[0] else {
-                unreachable!()
-            };
-            ui.horizontal_wrapped(|ui| {
-                ui.label(marker_label);
-                render_inlines(ui, inlines, base, rc);
-            });
-        } else {
-            ui.label(marker_label);
-            let id = egui::Id::new("list-item").with(rc.list_counter);
-            rc.list_counter += 1;
-            ui.indent(id, |ui| render_blocks(ui, doc, &item.blocks, base, rc));
-        }
-        if start.is_some() {
-            number += 1;
-        }
-    }
-}
-
-fn render_table(
-    ui: &mut Ui,
-    head: &[Vec<Inline>],
-    rows: &[Vec<Vec<Inline>>],
-    base: TextBase,
-    rc: &mut RenderCtx<'_>,
-) {
-    let columns = head.len().max(rows.iter().map(Vec::len).max().unwrap_or(0));
-    if columns == 0 {
-        return;
-    }
-
-    // NOTE: we deliberately do not use egui::Grid here — Grid measures cells
-    // with a tiny available width, which makes pre-wrapped galleys collapse
-    // to one-character-per-line and produces gigantic broken rows.
-
-    // Measure every cell's natural (single-line) width, including the header.
-    let mut widths = vec![0.0f32; columns];
-    let mut all_rows: Vec<&[Vec<Inline>]> = Vec::new();
-    if !head.is_empty() {
-        all_rows.push(head);
-    }
-    for row in rows {
-        all_rows.push(row);
-    }
-    for row in &all_rows {
-        for (c, cell) in row.iter().enumerate() {
-            let natural = measure_inlines_width(ui, cell, base);
-            widths[c] = widths[c].max(natural);
-        }
-    }
-    for w in widths.iter_mut() {
-        *w = (*w + 2.0 * CELL_PAD_X).max(MIN_COL_WIDTH);
-    }
-
-    // Fit the columns into the available width, like HTML's width:100%:
-    // shrink proportionally when too wide, grow proportionally when narrow.
-    let available = ui.available_width();
-    let total: f32 = widths.iter().sum();
-    if total > available {
-        let excess = total - available;
-        let shrinkable: f32 = widths.iter().map(|w| (w - MIN_COL_WIDTH).max(0.0)).sum();
-        if shrinkable > excess {
-            for w in widths.iter_mut() {
-                *w -= (*w - MIN_COL_WIDTH).max(0.0) / shrinkable * excess;
-            }
-        } else {
-            for w in widths.iter_mut() {
-                *w *= available / total;
-            }
-        }
-    } else if total < available {
-        for w in widths.iter_mut() {
-            *w *= available / total;
-        }
-    }
-
-    let head_base = TextBase {
-        strong: true,
-        ..base
-    };
-
-    for (ri, row) in all_rows.iter().enumerate() {
-        let row_base = if ri == 0 && !head.is_empty() {
-            head_base
-        } else {
-            base
-        };
-        ui.with_layout(
-            Layout::left_to_right(egui::Align::Min).with_cross_align(egui::Align::Min),
-            |ui| {
-                for (c, cell) in row.iter().enumerate() {
-                    let width = widths.get(c).copied().unwrap_or(MIN_COL_WIDTH);
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(width, 0.0),
-                        Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            ui.set_min_width(width);
-                            ui.set_max_width(width);
-                            ui.add_space(CELL_PAD_Y);
-                            ui.horizontal_wrapped(|ui| {
-                                ui.add_space(CELL_PAD_X);
-                                render_inlines(ui, cell, row_base, rc);
-                                ui.add_space(CELL_PAD_X);
-                            });
-                            ui.add_space(CELL_PAD_Y);
-                        },
-                    );
-                }
-            },
-        );
-        ui.separator();
-    }
-    ui.add_space(8.0);
-}
-
-/// Natural single-line width of a run sequence, for table column sizing.
-fn measure_inlines_width(ui: &Ui, inlines: &[Inline], base: TextBase) -> f32 {
-    let mut job = LayoutJob::default(); // no wrap: measure at natural width
-    for inline in inlines {
-        if let Inline::Run { text, style } = inline {
-            job.append(text.as_str(), 0.0, text_format(ui, base, style));
-        }
-    }
-    if job.text.is_empty() {
-        0.0
-    } else {
-        let galley = ui.ctx().fonts(|fonts| fonts.layout_job(job));
-        galley.size().x
-    }
-}
-
-fn render_code(ui: &mut Ui, lang: Option<&str>, text: &str, dim: bool) {
-    let bg = if dim {
-        ui.visuals().extreme_bg_color
-    } else {
-        ui.visuals().code_bg_color
-    };
-    Frame::default()
-        .fill(bg)
-        .inner_margin(Margin::same(8))
-        .corner_radius(4)
-        .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            if lang.is_some() || !text.is_empty() {
-                ui.horizontal(|ui| {
-                    if let Some(lang) = lang {
-                        ui.label(RichText::new(lang).small().weak().monospace());
+                let revision = shared.borrow().model.revision;
+                if dirty.get() || revision != last_pushed {
+                    dirty.set(false);
+                    last_pushed = revision;
+                    let presenter = shared.borrow();
+                    push_document(&webview, &presenter);
+                    let title = current_title(&presenter);
+                    if title != last_title {
+                        last_title = title;
+                        window.set_title(&last_title);
                     }
-                    ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("Copy").clicked() {
-                            ui.ctx().copy_text(text.to_owned());
-                        }
-                    });
-                });
-            }
-            let mut rich = RichText::new(text).monospace();
-            if dim {
-                rich = rich.weak();
-            }
-            ui.add(Label::new(rich).selectable(true));
-        });
-    ui.add_space(6.0);
-}
-
-fn render_inlines(ui: &mut Ui, inlines: &[Inline], base: TextBase, rc: &mut RenderCtx<'_>) {
-    // Runs are laid out in a single rich-text galley per contiguous segment
-    // (split only around images, which cannot live inside a galley). This
-    // gives proper word spacing, line height, and inline link hit-testing.
-    let mut job = make_job(ui);
-    let mut links: Vec<(std::ops::Range<usize>, String)> = Vec::new();
-    for inline in inlines {
-        match inline {
-            Inline::Run { text, style } => {
-                // Link spans are tracked in CHARACTER offsets, which is what
-                // `CCursor.index` uses for galley hit-testing.
-                let start_chars = job.text.chars().count();
-                job.append(text.as_str(), 0.0, text_format(ui, base, style));
-                if let Some(url) = &style.link {
-                    links.push((start_chars..job.text.chars().count(), url.clone()));
                 }
             }
-            Inline::Image { alt, url } => {
-                render_text_job(ui, std::mem::take(&mut job), std::mem::take(&mut links), rc);
-                render_image(ui, alt, url, rc);
+
+            _ => {}
+        }
+    });
+}
+
+/// Toolbar buttons navigate to `pound://…`; web links open externally.
+/// Everything else (the initial document, in-page anchors) is allowed.
+fn handle_navigation(url: &str, presenter: &mut Presenter, dirty: &Cell<bool>) -> bool {
+    if let Some(command) = url.strip_prefix("pound://") {
+        match command.split(['?', '#']).next().unwrap_or("") {
+            "open" => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Markdown", &["md", "markdown"])
+                    .pick_file()
+                {
+                    presenter.open_path(&path);
+                    dirty.set(true);
+                }
             }
-        }
-    }
-    render_text_job(ui, job, links, rc);
-}
-
-fn make_job(ui: &Ui) -> LayoutJob {
-    let mut job = LayoutJob::default();
-    job.wrap.max_width = ui.available_width();
-    job
-}
-
-/// Lay out one text segment, paint it, and open any clicked link span.
-fn render_text_job(
-    ui: &mut Ui,
-    job: LayoutJob,
-    links: Vec<(std::ops::Range<usize>, String)>,
-    rc: &mut RenderCtx<'_>,
-) {
-    if job.text.is_empty() {
-        return;
-    }
-    let galley = ui.ctx().fonts(|fonts| fonts.layout_job(job));
-    let (rect, response) = ui.allocate_exact_size(galley.size(), egui::Sense::click());
-    ui.painter()
-        .galley(rect.min, galley.clone(), ui.visuals().text_color());
-    if response.clicked() {
-        if let Some(pointer) = response.interact_pointer_pos() {
-            let char_index = galley.cursor_from_pos(pointer - rect.min).index;
-            if let Some((_, url)) = links.iter().find(|(range, _)| range.contains(&char_index)) {
-                rc.push_link(url);
+            "reload" => {
+                presenter.reload();
+                dirty.set(true);
             }
+            "dismiss-error" => {
+                presenter.dismiss_error();
+                dirty.set(true);
+            }
+            _ => {}
+        }
+        return false;
+    }
+
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:")
+    {
+        if let Err(e) = open::that(url) {
+            presenter.model.error = Some(format!("could not open {url}: {e}"));
+            dirty.set(true);
+        }
+        return false; // never navigate the reader away
+    }
+
+    true
+}
+
+/// Serve a `poundimg://<percent-encoded absolute path>` request from disk.
+fn serve_local_image(
+    request: http::Request<Vec<u8>>,
+) -> http::Response<std::borrow::Cow<'static, [u8]>> {
+    let uri = request.uri().to_string();
+    let path = crate::markdown::decode_poundimg_uri(&uri);
+    match path.and_then(|path| std::fs::read(&path).ok()) {
+        Some(bytes) => http::Response::builder()
+            .header("Content-Type", mime_for(&uri))
+            .header("Access-Control-Allow-Origin", "*")
+            .body(std::borrow::Cow::Owned(bytes))
+            .expect("static response headers"),
+        None => http::Response::builder()
+            .status(404)
+            .header("Content-Type", "text/plain")
+            .body(std::borrow::Cow::Borrowed(&b"not found"[..]))
+            .expect("static response headers"),
+    }
+}
+
+fn mime_for(uri: &str) -> &'static str {
+    let lower = uri.to_ascii_lowercase();
+    for (ext, mime) in [
+        (".png", "image/png"),
+        (".jpg", "image/jpeg"),
+        (".jpeg", "image/jpeg"),
+        (".gif", "image/gif"),
+        (".webp", "image/webp"),
+        (".bmp", "image/bmp"),
+        (".svg", "image/svg+xml"),
+        (".ico", "image/x-icon"),
+        (".avif", "image/avif"),
+    ] {
+        if lower.ends_with(ext) {
+            return mime;
         }
     }
-    if !links.is_empty() {
-        // Pointing hand over paragraphs that contain links.
-        response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    "application/octet-stream"
+}
+
+fn current_title(presenter: &Presenter) -> String {
+    match &presenter.model.document {
+        Some(doc) => format!("{} — Pound", doc.name()),
+        None => "Pound".to_owned(),
     }
 }
 
-fn text_format(ui: &Ui, base: TextBase, style: &Style) -> TextFormat {
-    let size = base
-        .size
-        .unwrap_or_else(|| ui.text_style_height(&egui::TextStyle::Body));
-    let bold = base.strong || style.bold;
-    let family = if style.code {
-        egui::FontFamily::Monospace
-    } else if bold {
-        egui::FontFamily::Name(BOLD_FAMILY.into())
-    } else {
-        egui::FontFamily::Proportional
-    };
-    let visuals = ui.visuals();
-    let color = if base.weak {
-        visuals.weak_text_color()
-    } else {
-        visuals.text_color()
-    };
-    // Roomier line height for body text (headings stay tighter), similar to
-    // typical web markdown rendering.
-    let line_height = if base.size.is_some() {
-        size * 1.3
-    } else {
-        size * 1.5
-    };
-    let mut format = TextFormat {
-        font_id: egui::FontId::new(size, family),
-        // Code chips use the monospace font's natural height: Segoe UI has a
-        // much taller ascent than Consolas, and forcing the shared row pitch
-        // on both anchors the chip's baseline noticeably HIGH. Natural height
-        // + centered valign puts code and body text on (almost) one baseline,
-        // and makes the background chip hug the text like VSCode's.
-        line_height: if style.code { None } else { Some(line_height) },
-        color,
-        background: if style.code {
-            visuals.code_bg_color
-        } else {
-            Color32::TRANSPARENT
-        },
-        italics: style.italic,
-        valign: egui::Align::Center,
-        ..Default::default()
-    };
-    if style.strike {
-        format.strikethrough = Stroke::new(1.0_f32, color);
-    }
-    if style.underline {
-        format.underline = Stroke::new(1.0_f32, color);
-    }
-    if style.link.is_some() {
-        format.color = visuals.hyperlink_color;
-        format.underline = Stroke::new(1.0_f32, visuals.hyperlink_color);
-    }
-    format
+fn apply_title(window: &tao::window::Window, presenter: &Presenter) {
+    window.set_title(&current_title(presenter));
 }
 
-/// Render an image reference. Only local files are supported for now;
-/// remote URLs show a placeholder chip.
-fn render_image(ui: &mut Ui, alt: &str, url: &str, rc: &mut RenderCtx<'_>) {
-    let remote = {
-        let lower = url.to_ascii_lowercase();
-        lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("data:")
+/// Push the model into the page. Kept as one JS call so a reload can restore
+/// the reading scroll position inside one script evaluation.
+fn push_document(webview: &WebView, presenter: &Presenter) {
+    let model = &presenter.model;
+    let (html, source, path) = match &model.document {
+        Some(doc) => (
+            doc.html.as_str(),
+            doc.source.as_str(),
+            doc.path.display().to_string(),
+        ),
+        None => ("", "", String::new()),
     };
-
-    if remote {
-        image_placeholder(ui, alt, url);
-        return;
+    let error = model.error.as_deref().unwrap_or("");
+    let js = format!(
+        "pound.setContent({}, {}, {}, {}); pound.setError({});",
+        json_str(html),
+        json_str(source),
+        json_str(&current_title(presenter)),
+        json_str(&path),
+        json_str(error),
+    );
+    if let Err(e) = webview.evaluate_script(&js) {
+        eprintln!("pound: failed to update the view: {e}");
     }
+}
 
-    let path = rc.doc_dir.join(url);
-    let key = path.display().to_string();
-
-    if !rc.images.contains_key(&key) && path.is_file() {
-        if let Ok(decoded) = image::open(&path) {
-            let rgba = decoded.to_rgba8();
-            let (w, h) = rgba.dimensions();
-            let color_image = ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
-            let texture = ui
-                .ctx()
-                .load_texture(&key, color_image, TextureOptions::default());
-            rc.images.insert(key.clone(), texture);
+/// Encode a &str as a double-quoted JavaScript string literal (our own HTML
+/// is trusted; this is only about quoting, not XSS — ammonia handles that).
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{2028}' | '\u{2029}' => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
         }
     }
-
-    if let Some(texture) = rc.images.get(&key) {
-        ui.add(Image::from_texture(texture).max_width(560.0));
-    } else {
-        image_placeholder(ui, alt, url);
-    }
+    out.push('"');
+    out
 }
 
-fn image_placeholder(ui: &mut Ui, alt: &str, url: &str) {
-    let text = if alt.is_empty() { "image" } else { alt };
-    let chip = RichText::new(format!("🖼 {text}"))
-        .small()
-        .monospace()
-        .background_color(ui.visuals().code_bg_color);
-    ui.label(chip).on_hover_text(url);
+fn window_icon() -> Option<tao::window::Icon> {
+    let decoded = image::load_from_memory(include_bytes!("../assets/pound.png")).ok()?;
+    let rgba = decoded.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    tao::window::Icon::from_rgba(rgba.into_raw(), w, h).ok()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// ---------------------------------------------------------------------------
+// The shell document: top bar, rendered pane, source pane. The markdown
+// styles use the token set borrowed from ColaMD's themes (GitHub-derived
+// palette) with a Segoe UI / Consolas stack for native Windows typography.
+// ---------------------------------------------------------------------------
 
-    #[test]
-    fn missing_system_font_returns_none() {
-        assert!(load_system_font("definitely-not-a-real-font.ttf").is_none());
+const SHELL_HTML: &str = r#"<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --bg: #ffffff; --text: #24292f; --muted: #656d76; --border: #d0d7de;
+    --link: #0969da; --code-bg: rgba(175,184,193,0.2); --code-block-bg: #f6f8fa;
+    --th-bg: #f6f8fa; --hover: rgba(175,184,193,0.25);
+    --error-fg: #cf222e; --error-bg: rgba(207,34,46,0.08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117; --text: #e6edf3; --muted: #8b949e; --border: #30363d;
+      --link: #58a6ff; --code-bg: rgba(110,118,129,0.4); --code-block-bg: #161b22;
+      --th-bg: #161b22; --hover: rgba(110,118,129,0.25);
+      --error-fg: #f85149; --error-bg: rgba(248,81,73,0.1);
     }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", "Segoe UI Variable Text", system-ui, sans-serif;
+    overflow: hidden;
+  }
 
-    /// Headless smoke test: whichever path `font_definitions` takes (Segoe
-    /// UI on Windows, bundled Ubuntu elsewhere), the bold family parses
-    /// through egui's font stack and lays out to a non-empty galley.
-    #[test]
-    fn bold_font_lays_out() {
-        let fonts = egui::text::Fonts::new(
-            1.0,
-            8192,
-            egui::epaint::AlphaFromCoverage::LIGHT_MODE_DEFAULT,
-            font_definitions(),
-        );
+  /* ---- top bar ---- */
+  #topbar {
+    position: fixed; inset: 0 0 auto 0; height: 44px; z-index: 10;
+    display: flex; align-items: center; gap: 10px; padding: 0 14px;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+  }
+  #topbar .brand { font-weight: 600; font-size: 14px; margin-right: 2px; }
+  #topbar button {
+    font: 13px "Segoe UI", system-ui, sans-serif; color: var(--text);
+    background: transparent; border: 1px solid var(--border); border-radius: 6px;
+    padding: 4px 12px; cursor: pointer;
+  }
+  #topbar button:hover { background: var(--hover); }
+  #topbar .spacer { flex: 1; }
+  #path {
+    color: var(--muted); font-size: 12px; max-width: 40%;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #topbar label.toggle {
+    display: flex; align-items: center; gap: 6px; font-size: 13px;
+    cursor: pointer; user-select: none;
+  }
+  #topbar kbd {
+    font: 11px Consolas, monospace; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 4px; padding: 0 4px;
+  }
 
-        let mut job = LayoutJob::default();
-        job.append(
-            "bold text",
-            0.0,
-            TextFormat {
-                font_id: egui::FontId::new(14.0, egui::FontFamily::Name(BOLD_FAMILY.into())),
-                ..Default::default()
-            },
-        );
-        let galley = fonts.layout_job(job);
-        assert!(galley.size().x > 0.0, "bold galley should have width");
-        assert!(galley.size().y > 0.0, "bold galley should have height");
+  /* ---- error banner ---- */
+  #error {
+    display: none; align-items: center; gap: 10px;
+    position: fixed; top: 50px; left: 50%; transform: translateX(-50%); z-index: 9;
+    max-width: 70%; padding: 8px 12px; border-radius: 6px;
+    background: var(--error-bg); color: var(--error-fg); font-size: 13px;
+    border: 1px solid var(--error-fg);
+  }
+  #error span { overflow-wrap: anywhere; }
+
+  /* ---- main panes ---- */
+  #main { display: flex; height: calc(100vh - 44px); margin-top: 44px; }
+  #content-wrap { flex: 1; overflow-y: auto; }
+  #source-wrap {
+    display: none; width: 42%; min-width: 240px;
+    border-left: 1px solid var(--border); overflow: auto; background: var(--bg);
+  }
+  body.split #source-wrap { display: block; }
+  #source {
+    margin: 0; padding: 14px 18px 60px;
+    font: 12.5px/1.6 Consolas, "Cascadia Mono", monospace;
+    white-space: pre; tab-size: 4;
+  }
+
+  /* ---- welcome ---- */
+  #welcome {
+    display: flex; flex-direction: column; align-items: center;
+    gap: 8px; padding-top: 24vh; color: var(--muted); text-align: center;
+  }
+  #welcome h1 { color: var(--text); font-size: 28px; margin: 0 0 4px; }
+  #welcome code {
+    background: var(--code-bg); border-radius: 5px; padding: 1px 5px;
+    font-family: Consolas, monospace; font-size: 12.5px;
+  }
+
+  /* ---- markdown content (GitHub/ColaMD token set) ---- */
+  #content {
+    max-width: 980px; margin: 0 auto; padding: 26px 32px 120px;
+    font-size: 15.5px; line-height: 1.65;
+  }
+  #content h1, #content h2, #content h3, #content h4, #content h5, #content h6 {
+    font-weight: 600; line-height: 1.25; margin: 26px 0 14px; scroll-margin-top: 60px;
+  }
+  #content h1 { font-size: 1.9em; padding-bottom: .3em; border-bottom: 1px solid var(--border); }
+  #content h2 { font-size: 1.45em; padding-bottom: .3em; border-bottom: 1px solid var(--border); }
+  #content h3 { font-size: 1.22em; } #content h4 { font-size: 1.05em; }
+  #content h5 { font-size: 0.95em; } #content h6 { font-size: 0.87em; color: var(--muted); }
+  #content p { margin: 0 0 16px; }
+  #content a { color: var(--link); text-decoration: none; }
+  #content a:hover { text-decoration: underline; }
+  #content code {
+    background: var(--code-bg); border-radius: 6px; padding: .2em .4em;
+    font-family: Consolas, "Cascadia Mono", monospace; font-size: 85%;
+  }
+  #content pre {
+    position: relative; background: var(--code-block-bg); border-radius: 6px;
+    padding: 14px 16px; margin: 0 0 16px; overflow: auto; line-height: 1.45;
+  }
+  #content pre code { background: none; padding: 0; font-size: 13px; }
+  #content pre .copy-btn {
+    position: absolute; top: 6px; right: 6px; opacity: 0;
+    font: 11px "Segoe UI", sans-serif; color: var(--muted);
+    background: var(--bg); border: 1px solid var(--border); border-radius: 5px;
+    padding: 2px 8px; cursor: pointer;
+  }
+  #content pre:hover .copy-btn { opacity: 1; }
+  #content blockquote {
+    margin: 0 0 16px; padding: 0 1em; color: var(--muted);
+    border-left: .25em solid var(--border);
+  }
+  #content table {
+    border-collapse: collapse; display: block; max-width: 100%;
+    overflow: auto; margin: 0 0 16px;
+  }
+  #content th, #content td { border: 1px solid var(--border); padding: 6px 13px; }
+  #content th { background: var(--th-bg); font-weight: 600; }
+  #content img { max-width: 100%; }
+  #content hr { border: 0; border-top: 1px solid var(--border); margin: 24px 0; }
+  #content ul, #content ol { padding-left: 2em; margin: 0 0 16px; }
+  #content li { margin: .25em 0; }
+  #content li:has(> input[type="checkbox"]) { list-style: none; margin-left: -1.2em; }
+  #content input[type="checkbox"] { margin: 0 .6em 0 0; vertical-align: middle; }
+  #content kbd {
+    font: 85% Consolas, monospace; border: 1px solid var(--border);
+    border-radius: 4px; padding: 1px 5px; background: var(--code-block-bg);
+  }
+  #content del { color: var(--muted); }
+</style>
+</head>
+<body>
+  <div id="topbar">
+    <span class="brand">Pound</span>
+    <button id="open" type="button">Open&#8230;</button>
+    <button id="reload" type="button">Reload</button>
+    <span class="spacer"></span>
+    <span id="path"></span>
+    <label class="toggle">
+      <input type="checkbox" id="source-toggle"> Source <kbd>Ctrl+U</kbd>
+    </label>
+  </div>
+  <div id="error"><span></span><button id="dismiss" type="button">Dismiss</button></div>
+  <div id="main">
+    <div id="content-wrap">
+      <div id="welcome">
+        <h1>Pound</h1>
+        <div>A tiny markdown reader.</div>
+        <div>Drop a <code>.md</code> file anywhere in this window,</div>
+        <div>or run <code>pound path/to/file.md</code> from a terminal.</div>
+      </div>
+      <article id="content"></article>
+    </div>
+    <div id="source-wrap"><pre id="source"></pre></div>
+  </div>
+<script>
+  window.pound = {
+    setContent(html, source, title, path) {
+      const wrap = document.getElementById('content-wrap');
+      const scroll = wrap.scrollTop;
+      const content = document.getElementById('content');
+      const welcome = document.getElementById('welcome');
+      content.innerHTML = html;
+      content.style.display = html ? 'block' : 'none';
+      welcome.style.display = html ? 'none' : 'flex';
+      document.getElementById('source').textContent = source;
+      document.getElementById('path').textContent = path;
+      if (title) document.title = title;
+      wrap.scrollTop = scroll; // keep the reading position on reload
+      addCopyButtons();
+    },
+    setError(msg) {
+      const el = document.getElementById('error');
+      el.style.display = msg ? 'flex' : 'none';
+      el.querySelector('span').textContent = msg || '';
+    },
+  };
+
+  function addCopyButtons() {
+    document.querySelectorAll('#content pre').forEach(pre => {
+      if (pre.querySelector('.copy-btn')) return;
+      const btn = document.createElement('button');
+      btn.type = 'button'; btn.className = 'copy-btn'; btn.textContent = 'Copy';
+      btn.onclick = () => {
+        copyText(pre.innerText).then(() => {
+          btn.textContent = 'Copied';
+          setTimeout(() => (btn.textContent = 'Copy'), 1200);
+        });
+      };
+      pre.appendChild(btn);
+    });
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).catch(() => legacyCopy(text));
     }
-}
+    return Promise.resolve(legacyCopy(text));
+  }
+
+  function legacyCopy(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } finally { ta.remove(); }
+  }
+
+  document.getElementById('open').onclick = () => (location.href = 'pound://open');
+  document.getElementById('reload').onclick = () => (location.href = 'pound://reload');
+  document.getElementById('dismiss').onclick = () => (location.href = 'pound://dismiss-error');
+
+  const toggle = document.getElementById('source-toggle');
+  const applySplit = () => document.body.classList.toggle('split', toggle.checked);
+  toggle.onchange = applySplit;
+
+  addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'u') {
+      e.preventDefault();
+      toggle.checked = !toggle.checked;
+      applySplit();
+    }
+  });
+</script>
+</body>
+</html>
+"#;

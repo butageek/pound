@@ -47,8 +47,8 @@ impl Presenter {
     }
 
     /// Called on a timer so external edits show up without a restart.
-    pub fn reload_if_changed(&mut self) {
-        self.model.reload_if_changed();
+    pub fn reload_if_changed(&mut self) -> bool {
+        self.model.reload_if_changed()
     }
 
     /// Handle files dragged onto the window: prefer markdown files.
@@ -115,6 +115,21 @@ mod tests {
             presenter.model.document.as_ref().unwrap().path,
             md.canonicalize().unwrap()
         );
+    }
+
+    #[test]
+    fn view_intents_toggle_reload_and_watch() {
+        let mut presenter = Presenter {
+            model: Model::default(),
+        };
+        presenter.toggle_source();
+        assert!(presenter.model.show_source);
+        presenter.set_show_source(false);
+        assert!(!presenter.model.show_source);
+        // No document open: reload / watch are no-ops, not errors.
+        presenter.reload();
+        assert!(!presenter.reload_if_changed());
+        assert!(presenter.model.error.is_none());
     }
 
     #[test]

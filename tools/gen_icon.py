@@ -109,10 +109,13 @@ def wrap_ico(png):
 
 
 def main():
-    out = Path(__file__).resolve().parent.parent / "assets" / "pound.ico"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_bytes(wrap_ico(encode_png(make_pixels())))
-    print(f"wrote {out} ({out.stat().st_size} bytes)")
+    root = Path(__file__).resolve().parent.parent / "assets"
+    root.mkdir(parents=True, exist_ok=True)
+    png = encode_png(make_pixels())
+    (root / "pound.png").write_bytes(png)
+    (root / "pound.ico").write_bytes(wrap_ico(png))
+    print(f"wrote {root / 'pound.png'} ({(root / 'pound.png').stat().st_size} bytes)")
+    print(f"wrote {root / 'pound.ico'} ({(root / 'pound.ico').stat().st_size} bytes)")
 
 
 if __name__ == "__main__":

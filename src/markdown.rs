@@ -1,622 +1,288 @@
-//! Markdown parsing (Model layer).
+//! Markdown → HTML (Model layer).
 //!
-//! Converts `pulldown-cmark` events into a small, UI-neutral tree of
-//! `Block`/`Inline` values. The view layer renders this tree with egui
-//! without knowing anything about the markdown parser.
+//! The rendered pane is a WebView2 showing HTML/CSS, which gives the same
+//! rendering quality as VSCode's markdown preview (also a browser engine).
+//! This module turns the markdown source into that HTML:
+//!
+//! - pulldown-cmark generates the HTML (tables, task lists, strikethrough…)
+//! - local image `src`s are rewritten to the `poundimg://` custom protocol
+//!   (served from disk by the view layer, like ColaMD's `file://` mapping)
+//! - the result is sanitized with ammonia: markdown files can contain raw
+//!   HTML, and file content must never execute in the reader (borrowed
+//!   lesson from ColaMD's architecture notes).
 
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use std::path::Path;
 
-/// Inline character style captured at the moment a text run was parsed.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Style {
-    pub bold: bool,
-    pub italic: bool,
-    pub strike: bool,
-    pub underline: bool,
-    pub code: bool,
-    /// When set, this run should be rendered as a hyperlink to this URL.
-    pub link: Option<String>,
-}
+use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag};
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum Inline {
-    Run { text: String, style: Style },
-    Image { alt: String, url: String },
-}
-
-/// One list item; `task` is `Some(checked)` for `- [x]` style task items.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Item {
-    pub task: Option<bool>,
-    pub blocks: Vec<Block>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Block {
-    Heading {
-        level: u8,
-        inlines: Vec<Inline>,
-    },
-    Paragraph(Vec<Inline>),
-    Code {
-        lang: Option<String>,
-        text: String,
-    },
-    /// Raw HTML found in the document; shown as a dim code block.
-    Html(String),
-    Quote(Vec<Block>),
-    List {
-        start: Option<u64>,
-        items: Vec<Item>,
-    },
-    Rule,
-    Table {
-        head: Vec<Vec<Inline>>,
-        rows: Vec<Vec<Vec<Inline>>>,
-    },
-}
-
-enum Frame {
-    Quote(Vec<Block>),
-    List {
-        start: Option<u64>,
-        items: Vec<Item>,
-    },
-    Item(Vec<Block>),
-}
-
-#[derive(Default)]
-struct TableBuild {
-    head: Vec<Vec<Inline>>,
-    rows: Vec<Vec<Vec<Inline>>>,
-    row: Vec<Vec<Inline>>,
-    cell: Option<Vec<Inline>>,
-}
-
-#[derive(Default)]
-struct Builder {
-    root: Vec<Block>,
-    frames: Vec<Frame>,
-    inlines: Vec<Inline>,
-    style: Style,
-    image: Option<(String, String)>,        // (url, alt)
-    code: Option<(Option<String>, String)>, // (lang, text)
-    html: Option<String>,
-    table: Option<TableBuild>,
-    task: Option<bool>,
-}
-
-impl Builder {
-    /// Where the next completed block belongs.
-    fn top(&mut self) -> &mut Vec<Block> {
-        match self.frames.last_mut() {
-            Some(Frame::Quote(blocks)) | Some(Frame::Item(blocks)) => blocks,
-            Some(Frame::List { items, .. }) => {
-                // A block that appears directly inside a list (no Item) is
-                // treated as an implicit single item.
-                items.push(Item {
-                    task: None,
-                    blocks: Vec::new(),
-                });
-                let Item { blocks, .. } = items.last_mut().expect("just pushed");
-                blocks
-            }
-            None => &mut self.root,
-        }
-    }
-
-    fn push_block(&mut self, block: Block) {
-        self.top().push(block);
-    }
-
-    fn flush_inlines(&mut self) {
-        if !self.inlines.is_empty() {
-            let inlines = std::mem::take(&mut self.inlines);
-            self.push_block(Block::Paragraph(inlines));
-        }
-    }
-
-    fn text(&mut self, text: &str) {
-        if let Some((_, alt)) = &mut self.image {
-            alt.push_str(text);
-        } else if let Some((_, buf)) = &mut self.code {
-            buf.push_str(text);
-        } else if let Some(html) = &mut self.html {
-            html.push_str(text);
-        } else if let Some(table) = &mut self.table {
-            if let Some(cell) = &mut table.cell {
-                cell.push(Inline::Run {
-                    text: text.to_owned(),
-                    style: self.style.clone(),
-                });
-            }
-        } else {
-            self.inlines.push(Inline::Run {
-                text: text.to_owned(),
-                style: self.style.clone(),
-            });
-        }
-    }
-
-    /// Map a raw inline-HTML fragment onto style flags: the common
-    /// formatting tags (`<b>`, `<em>`, `<u>`, `<s>`, `<code>`, …) toggle the
-    /// matching flag, `<br>` is a hard break, everything else is ignored.
-    fn inline_html_tag(&mut self, html: &str) {
-        let trimmed = html.trim();
-        if trimmed.len() < 3 || !trimmed.starts_with('<') || !trimmed.ends_with('>') {
-            return;
-        }
-        if let Some(rest) = trimmed.strip_prefix("</") {
-            // Closing tag: </name>
-            let name = rest.trim_end_matches('>').trim();
-            match name.to_ascii_lowercase().as_str() {
-                "b" | "strong" => self.style.bold = false,
-                "i" | "em" => self.style.italic = false,
-                "u" | "ins" => self.style.underline = false,
-                "s" | "del" | "strike" | "strikethrough" => self.style.strike = false,
-                "code" => self.style.code = false,
-                _ => {}
-            }
-            return;
-        }
-        // Opening tag: <name> / <name attr="…"> / <br/> — attributes ignored.
-        let inner = &trimmed[1..trimmed.len() - 1];
-        let name = inner
-            .split(|c: char| c.is_whitespace() || c == '/')
-            .next()
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        match name.as_str() {
-            "b" | "strong" => self.style.bold = true,
-            "i" | "em" => self.style.italic = true,
-            "u" | "ins" => self.style.underline = true,
-            "s" | "del" | "strike" | "strikethrough" => self.style.strike = true,
-            "code" => self.style.code = true,
-            "br" => self.text("\n"),
-            _ => {}
-        }
-    }
-
-    fn code_span(&mut self, code: &str) {
-        if let Some((_, alt)) = &mut self.image {
-            alt.push_str(code);
-            return;
-        }
-        let mut style = self.style.clone();
-        style.code = true;
-        let run = Inline::Run {
-            text: code.to_owned(),
-            style,
-        };
-        if let Some(table) = &mut self.table {
-            if let Some(cell) = &mut table.cell {
-                cell.push(run);
-                return;
-            }
-        }
-        self.inlines.push(run);
-    }
-
-    fn event(&mut self, event: Event) {
-        match event {
-            Event::Start(tag) => self.start(tag),
-            Event::End(end) => self.end(end),
-            Event::Text(t) => self.text(&t),
-            Event::Code(c) => self.code_span(&c),
-            Event::SoftBreak => self.text(" "),
-            Event::HardBreak => self.text("\n"),
-            Event::Rule => {
-                self.flush_inlines();
-                self.push_block(Block::Rule);
-            }
-            Event::TaskListMarker(done) => self.task = Some(done),
-            Event::Html(h) | Event::InlineHtml(h) => {
-                if let Some(html) = &mut self.html {
-                    html.push_str(&h);
-                } else if let Some((_, buf)) = &mut self.code {
-                    buf.push_str(&h);
-                } else {
-                    self.inline_html_tag(&h);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn start(&mut self, tag: Tag) {
-        match tag {
-            Tag::Paragraph => {}
-            Tag::Heading { .. } => self.flush_inlines(),
-            Tag::BlockQuote(_) => {
-                self.flush_inlines();
-                self.frames.push(Frame::Quote(Vec::new()));
-            }
-            Tag::List(start) => {
-                self.flush_inlines();
-                self.frames.push(Frame::List {
-                    start,
-                    items: Vec::new(),
-                });
-            }
-            Tag::Item => {
-                self.flush_inlines();
-                self.frames.push(Frame::Item(Vec::new()));
-            }
-            Tag::CodeBlock(kind) => {
-                self.flush_inlines();
-                let lang = match kind {
-                    CodeBlockKind::Fenced(l) => Some(l.to_string()),
-                    CodeBlockKind::Indented => None,
-                };
-                self.code = Some((lang, String::new()));
-            }
-            Tag::Emphasis => self.style.italic = true,
-            Tag::Strong => self.style.bold = true,
-            Tag::Strikethrough => self.style.strike = true,
-            Tag::Link { dest_url, .. } => self.style.link = Some(dest_url.to_string()),
-            Tag::Image { dest_url, .. } => self.image = Some((dest_url.to_string(), String::new())),
-            Tag::HtmlBlock => self.html = Some(String::new()),
-            Tag::Table(_) => {
-                self.flush_inlines();
-                self.table = Some(TableBuild::default());
-            }
-            Tag::TableHead => {}
-            Tag::TableRow => {
-                if let Some(t) = &mut self.table {
-                    t.row = Vec::new();
-                }
-            }
-            Tag::TableCell => {
-                if let Some(t) = &mut self.table {
-                    t.cell = Some(Vec::new());
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn end(&mut self, end: TagEnd) {
-        match end {
-            TagEnd::Paragraph => self.flush_inlines(),
-            TagEnd::Heading(level) => {
-                let inlines = std::mem::take(&mut self.inlines);
-                let level = heading_level(level);
-                self.push_block(Block::Heading { level, inlines });
-            }
-            TagEnd::BlockQuote(_) => {
-                if matches!(self.frames.last(), Some(Frame::Quote(_))) {
-                    if let Some(Frame::Quote(blocks)) = self.frames.pop() {
-                        self.push_block(Block::Quote(blocks));
-                    }
-                }
-            }
-            TagEnd::List(_) => {
-                if matches!(self.frames.last(), Some(Frame::List { .. })) {
-                    if let Some(Frame::List { start, items }) = self.frames.pop() {
-                        self.push_block(Block::List { start, items });
-                    }
-                }
-            }
-            TagEnd::Item => {
-                self.flush_inlines();
-                if matches!(self.frames.last(), Some(Frame::Item(_))) {
-                    if let Some(Frame::Item(blocks)) = self.frames.pop() {
-                        let item = Item {
-                            task: self.task.take(),
-                            blocks,
-                        };
-                        match self.frames.last_mut() {
-                            Some(Frame::List { items, .. }) => items.push(item),
-                            _ => {
-                                // Item outside a list (shouldn't happen); keep content.
-                                let Item { blocks, .. } = &item;
-                                let blocks = blocks.clone();
-                                self.push_block(Block::List {
-                                    start: None,
-                                    items: vec![Item {
-                                        task: item.task,
-                                        blocks,
-                                    }],
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            TagEnd::CodeBlock => {
-                if let Some((lang, text)) = self.code.take() {
-                    self.push_block(Block::Code { lang, text });
-                }
-            }
-            TagEnd::Emphasis => self.style.italic = false,
-            TagEnd::Strong => self.style.bold = false,
-            TagEnd::Strikethrough => self.style.strike = false,
-            TagEnd::Link => self.style.link = None,
-            TagEnd::Image => {
-                if let Some((url, alt)) = self.image.take() {
-                    let img = Inline::Image { alt, url };
-                    if let Some(table) = &mut self.table {
-                        if let Some(cell) = &mut table.cell {
-                            cell.push(img);
-                        } else {
-                            self.inlines.push(img);
-                        }
-                    } else {
-                        self.inlines.push(img);
-                    }
-                }
-            }
-            TagEnd::HtmlBlock => {
-                if let Some(html) = self.html.take() {
-                    self.push_block(Block::Html(html));
-                }
-            }
-            TagEnd::Table => {
-                if let Some(t) = self.table.take() {
-                    let TableBuild { head, rows, .. } = t;
-                    self.push_block(Block::Table { head, rows });
-                }
-            }
-            TagEnd::TableHead => {
-                if let Some(t) = &mut self.table {
-                    t.head = std::mem::take(&mut t.row);
-                }
-            }
-            TagEnd::TableRow => {
-                if let Some(t) = &mut self.table {
-                    let row = std::mem::take(&mut t.row);
-                    if !row.is_empty() {
-                        t.rows.push(row);
-                    }
-                }
-            }
-            TagEnd::TableCell => {
-                if let Some(t) = &mut self.table {
-                    if let Some(cell) = t.cell.take() {
-                        t.row.push(cell);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn finish(mut self) -> Vec<Block> {
-        self.flush_inlines();
-        while let Some(frame) = self.frames.pop() {
-            match frame {
-                Frame::Quote(blocks) => self.root.push(Block::Quote(blocks)),
-                Frame::List { start, items } => self.root.push(Block::List { start, items }),
-                Frame::Item(blocks) => self.root.push(Block::List {
-                    start: None,
-                    items: vec![Item { task: None, blocks }],
-                }),
-            }
-        }
-        self.root
-    }
-}
-
-fn heading_level(level: HeadingLevel) -> u8 {
-    match level {
-        HeadingLevel::H1 => 1,
-        HeadingLevel::H2 => 2,
-        HeadingLevel::H3 => 3,
-        HeadingLevel::H4 => 4,
-        HeadingLevel::H5 => 5,
-        HeadingLevel::H6 => 6,
-    }
-}
-
-/// Parse a markdown document into a renderable block tree.
-pub fn parse(source: &str) -> Vec<Block> {
+/// Render markdown source to sanitized HTML, resolving image references
+/// against `base_dir` (the document's directory).
+pub fn to_html(source: &str, base_dir: &Path) -> String {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_TASKLISTS);
     options.insert(Options::ENABLE_STRIKETHROUGH);
 
-    let mut builder = Builder::default();
-    for event in Parser::new_ext(source, options) {
-        builder.event(event);
+    let parser = Parser::new_ext(source, options).map(|event| match event {
+        Event::Start(Tag::Image {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) => {
+            let resolved = localize_image(&dest_url, base_dir);
+            Event::Start(Tag::Image {
+                link_type,
+                dest_url: CowStr::from(resolved),
+                title,
+                id,
+            })
+        }
+        other => other,
+    });
+
+    let mut raw = String::new();
+    html::push_html(&mut raw, parser);
+    sanitize(&raw)
+}
+
+/// Rewrite relative image URLs to `poundimg://<absolute path>`; leave
+/// remote/data URLs untouched.
+fn localize_image(url: &str, base_dir: &Path) -> String {
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("data:")
+        || lower.starts_with("poundimg://")
+    {
+        return url.to_owned();
     }
-    builder.finish()
+    let joined = base_dir.join(url);
+    match joined.canonicalize() {
+        Ok(absolute) => format!(
+            "poundimg://{}",
+            percent_encode(&absolute.display().to_string())
+        ),
+        // Missing file: keep the original src so it shows as a broken image.
+        Err(_) => url.to_owned(),
+    }
+}
+
+/// Percent-encode everything outside the URI unreserved set so spaces,
+/// `#`, `?` etc. in file paths survive the URL round-trip.
+fn percent_encode(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        match byte {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'~'
+            | b':'
+            | b'\\'
+            | b'/' => out.push(byte as char),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// Decode a percent-encoded `poundimg` URI body back into a filesystem path.
+pub fn decode_poundimg_uri(uri: &str) -> Option<String> {
+    let body = uri.strip_prefix("poundimg://")?;
+    let bytes = body.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex(bytes.get(i + 1)), hex(bytes.get(i + 2))) {
+                out.push(hi * 16 + lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).ok()
+}
+
+fn hex(byte: Option<&u8>) -> Option<u8> {
+    let b = *byte?;
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Keep the markdown-oriented tags pulldown emits (including the task-list
+/// `<input type="checkbox">`), strip scripts, event handlers and styling
+/// from raw HTML embedded in the file.
+fn sanitize(raw: &str) -> String {
+    let tags = [
+        "a",
+        "abbr",
+        "b",
+        "bdi",
+        "blockquote",
+        "br",
+        "caption",
+        "code",
+        "dd",
+        "del",
+        "details",
+        "div",
+        "dl",
+        "dt",
+        "em",
+        "figcaption",
+        "figure",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "hr",
+        "i",
+        "img",
+        "input",
+        "ins",
+        "kbd",
+        "li",
+        "mark",
+        "ol",
+        "p",
+        "pre",
+        "q",
+        "s",
+        "samp",
+        "small",
+        "span",
+        "strike",
+        "strong",
+        "sub",
+        "summary",
+        "sup",
+        "table",
+        "tbody",
+        "td",
+        "tfoot",
+        "th",
+        "thead",
+        "tr",
+        "u",
+        "ul",
+        "var",
+    ]
+    .into_iter()
+    .collect::<std::collections::HashSet<&str>>();
+
+    ammonia::Builder::new()
+        .tags(tags)
+        .add_tag_attributes("input", ["type", "checked", "disabled"])
+        // pulldown leaves remote images as-is and we rewrite local ones to
+        // poundimg:// — both must survive the sanitizer's URL filter.
+        .add_url_schemes(["poundimg", "data"])
+        .url_relative(ammonia::UrlRelative::PassThrough)
+        .clean(raw)
+        .to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn run(source: &str) -> Vec<Block> {
-        parse(source)
+    fn dir() -> std::path::PathBuf {
+        std::path::PathBuf::from("/tmp/docs")
     }
 
     #[test]
-    fn heading_and_bold_italic() {
-        let blocks = run("# Title\n\nHello **bold** and *it* world");
-        assert_eq!(blocks.len(), 2);
-        assert!(matches!(&blocks[0], Block::Heading { level: 1, .. }));
-        match &blocks[1] {
-            Block::Paragraph(inlines) => {
-                // "Hello ", "bold", " and ", "it", " world"
-                assert_eq!(inlines.len(), 5);
-                let bold = &inlines[1];
-                match bold {
-                    Inline::Run { text, style } => {
-                        assert_eq!(text, "bold");
-                        assert!(style.bold && !style.italic);
-                    }
-                    other => panic!("expected run, got {other:?}"),
-                }
-                if let Inline::Run { style, .. } = &inlines[3] {
-                    assert!(style.italic && !style.bold);
-                } else {
-                    panic!("expected run");
-                }
-            }
-            other => panic!("expected paragraph, got {other:?}"),
-        }
+    #[ignore = "manual preview helper: renders the repo's sample.md for browser testing"]
+    fn dump_rendered_sample() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(root.join("sample.md")).expect("sample.md");
+        let html = to_html(&source, root);
+        std::fs::write(std::env::temp_dir().join("pound-sample-content.html"), html).unwrap();
+        std::fs::write(std::env::temp_dir().join("pound-sample-source.txt"), source).unwrap();
     }
 
     #[test]
-    fn code_block() {
-        let blocks = run("```rust\nfn main() {}\n```\n");
-        match &blocks[0] {
-            Block::Code { lang, text } => {
-                assert_eq!(lang.as_deref(), Some("rust"));
-                assert_eq!(text, "fn main() {}\n");
-            }
-            other => panic!("expected code block, got {other:?}"),
-        }
+    fn headings_and_emphasis() {
+        let html = to_html("# Title\n\nHello **bold** and *it* and `code`", &dir());
+        assert!(html.contains("<h1>Title</h1>"));
+        assert!(html.contains("<strong>bold</strong>"));
+        assert!(html.contains("<em>it</em>"));
+        assert!(html.contains("<code>code</code>"));
     }
 
     #[test]
-    fn nested_lists() {
-        let blocks = run("- a\n  - b\n- c\n");
-        match &blocks[0] {
-            Block::List { start, items } => {
-                assert_eq!(*start, None);
-                assert_eq!(items.len(), 2);
-                // first item contains a paragraph then a nested list
-                match &items[0].blocks[1] {
-                    Block::List { items: inner, .. } => assert_eq!(inner.len(), 1),
-                    other => panic!("expected nested list, got {other:?}"),
-                }
-            }
-            other => panic!("expected list, got {other:?}"),
-        }
+    fn tables_render_as_real_tables() {
+        let html = to_html("| a | b |\n|---|---|\n| 1 | 2 |\n", &dir());
+        assert!(html.contains("<table>"));
+        assert!(html.contains("<th>"));
+        assert!(html.contains("<td>"));
     }
 
     #[test]
-    fn ordered_list_start() {
-        let blocks = run("3. three\n4. four\n");
-        match &blocks[0] {
-            Block::List {
-                start: Some(3),
-                items,
-            } => assert_eq!(items.len(), 2),
-            other => panic!("expected ordered list, got {other:?}"),
-        }
+    fn task_lists_get_checkboxes() {
+        let html = to_html("- [x] done\n- [ ] todo\n", &dir());
+        assert!(html.contains(r#"type="checkbox""#), "html was: {html}");
+        assert!(html.contains("checked"), "html was: {html}");
     }
 
     #[test]
-    fn task_list() {
-        let blocks = run("- [x] done\n- [ ] todo\n");
-        match &blocks[0] {
-            Block::List { items, .. } => {
-                assert_eq!(items[0].task, Some(true));
-                assert_eq!(items[1].task, Some(false));
-            }
-            other => panic!("expected list, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn links_and_images() {
-        let blocks = run("[site](https://example.com)\n\n![logo](img/logo.png)\n");
-        match &blocks[0] {
-            Block::Paragraph(inlines) => match &inlines[0] {
-                Inline::Run { text, style } => {
-                    assert_eq!(text, "site");
-                    assert_eq!(style.link.as_deref(), Some("https://example.com"));
-                }
-                other => panic!("expected run, got {other:?}"),
-            },
-            other => panic!("expected paragraph, got {other:?}"),
-        }
-        match &blocks[1] {
-            Block::Paragraph(inlines) => match &inlines[0] {
-                Inline::Image { alt, url } => {
-                    assert_eq!(alt, "logo");
-                    assert_eq!(url, "img/logo.png");
-                }
-                other => panic!("expected image, got {other:?}"),
-            },
-            other => panic!("expected paragraph, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn table() {
-        let blocks = run("| a | b |\n|---|---|\n| 1 | 2 |\n");
-        match &blocks[0] {
-            Block::Table { head, rows } => {
-                assert_eq!(head.len(), 2);
-                assert_eq!(rows.len(), 1);
-                assert_eq!(rows[0].len(), 2);
-            }
-            other => panic!("expected table, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn blockquote() {
-        let blocks = run("> quoted\n");
-        match &blocks[0] {
-            Block::Quote(inner) => assert_eq!(inner.len(), 1),
-            other => panic!("expected quote, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn inline_html_formatting_tags() {
-        let blocks = run("<b>bold</b> <i>it</i> <u>und</u> <s>gone</s> <code>x</code>");
-        let Block::Paragraph(inlines) = &blocks[0] else {
-            panic!("expected paragraph, got {:?}", blocks[0])
-        };
-        // styled runs separated by plain-space runs
-        assert_eq!(inlines.len(), 9);
-        let runs: Vec<&Inline> = inlines.iter().step_by(2).collect();
-        let expected = [
-            ("bold", true, false, false, false),
-            ("it", false, true, false, false),
-            ("und", false, false, true, false),
-            ("gone", false, false, false, true),
-            ("x", false, false, false, false),
-        ];
-        for (run, (text, bold, italic, underline, strike)) in runs.iter().zip(expected) {
-            let Inline::Run { text: got, style } = run else {
-                panic!("expected run, got {run:?}")
-            };
-            assert_eq!(got, text);
-            assert_eq!(style.bold, bold, "bold of {text}");
-            assert_eq!(style.italic, italic, "italic of {text}");
-            assert_eq!(style.underline, underline, "underline of {text}");
-            assert_eq!(style.strike, strike, "strike of {text}");
-        }
-        if let Inline::Run { style, .. } = runs[4] {
-            assert!(style.code);
-        }
-    }
-
-    #[test]
-    fn br_tag_is_a_hard_break() {
-        let blocks = run("line one<br>line two");
-        let Block::Paragraph(inlines) = &blocks[0] else {
-            panic!("expected paragraph")
-        };
-        assert_eq!(inlines.len(), 3);
-        assert_eq!(
-            inlines[1],
-            Inline::Run {
-                text: "\n".to_owned(),
-                style: Style::default()
-            }
+    fn local_images_are_rewritten_to_the_custom_protocol() {
+        // A missing file keeps its original src…
+        let html = to_html("![missing](nope/never-exists.png)", &dir());
+        assert!(html.contains("nope/never-exists.png"));
+        // …while an existing file resolves to an absolute poundimg:// URL.
+        let tmp = std::env::temp_dir().join(format!("pound-img-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("pic.txt"), b"x").unwrap();
+        let html = to_html("![pic](pic.txt)", &tmp);
+        let expected = format!(
+            "poundimg://{}",
+            percent_encode(
+                &tmp.join("pic.txt")
+                    .canonicalize()
+                    .unwrap()
+                    .display()
+                    .to_string()
+            )
         );
+        assert!(html.contains(&expected), "html was: {html}");
     }
 
     #[test]
-    fn unknown_inline_html_is_dropped() {
-        let blocks = run("<span class=\"a\">kept</span>");
-        let Block::Paragraph(inlines) = &blocks[0] else {
-            panic!("expected paragraph")
-        };
-        assert_eq!(inlines.len(), 1);
-        match &inlines[0] {
-            Inline::Run { text, style } => {
-                assert_eq!(text, "kept");
-                assert_eq!(*style, Style::default());
-            }
-            other => panic!("expected run, got {other:?}"),
-        }
+    fn remote_images_are_untouched() {
+        let html = to_html("![x](https://example.com/a%20b.png)", &dir());
+        assert!(html.contains("https://example.com/a%20b.png"));
+    }
+
+    #[test]
+    fn raw_html_scripts_are_stripped() {
+        let html = to_html(
+            "hello <script>alert(1)</script> and <b onclick=\"x()\">bold</b>",
+            &dir(),
+        );
+        assert!(!html.contains("script"));
+        assert!(!html.contains("onclick"));
+        assert!(html.contains("<b>bold</b>"));
+    }
+
+    #[test]
+    fn poundimg_uri_round_trip() {
+        let path = r"C:\Users\hendry.chou\My Docs\img #1.png";
+        let encoded = percent_encode(path);
+        assert_eq!(
+            decode_poundimg_uri(&format!("poundimg://{encoded}")).unwrap(),
+            path
+        );
     }
 }

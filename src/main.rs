@@ -2,25 +2,31 @@
 //!
 //! Architecture (MVP pattern):
 //! - [`model`]      : state (document, view mode, errors)
-//! - [`markdown`]   : parsing (markdown source -> neutral block tree)
+//! - [`markdown`]   : rendering input (markdown source -> sanitized HTML)
 //! - [`presenter`]  : user intents / use-cases over the model
-//! - [`view`]       : egui/eframe rendering; forwards events to the presenter
+//! - [`view`]       : WebView2 shell (tao + wry) showing the HTML with
+//!   VSCode-grade browser rendering
 
 // Hide the console window when double-clicking a .md file on Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cli;
+// The GUI core is exercised by the Windows view and the test suite;
+// non-Windows hosts run the tests only.
+#[cfg(any(windows, test))]
 mod markdown;
+#[cfg(any(windows, test))]
 mod model;
+#[cfg(any(windows, test))]
 mod presenter;
 #[cfg(windows)]
 mod register;
+#[cfg(windows)]
 mod view;
 
 use std::path::PathBuf;
 
 use cli::Command;
-use eframe::egui;
 
 fn main() {
     match cli::parse(std::env::args().skip(1)) {
@@ -44,20 +50,16 @@ fn main() {
     }
 }
 
+#[cfg(windows)]
 fn run_gui(file: Option<PathBuf>) {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1120.0, 760.0])
-            .with_min_inner_size([560.0, 400.0])
-            .with_title("Pound"),
-        ..Default::default()
-    };
-    let creator: eframe::AppCreator =
-        Box::new(|cc| Ok(Box::new(view::AppView::new(cc, file)) as Box<dyn eframe::App>));
-    if let Err(e) = eframe::run_native("pound", options, creator) {
-        eprintln!("pound: {e}");
-        std::process::exit(1);
-    }
+    view::run(file);
+}
+
+#[cfg(not(windows))]
+fn run_gui(_file: Option<PathBuf>) {
+    // The GUI targets Windows (WebView2). Other platforms run the unit
+    // tests only.
+    eprintln!("pound: the GUI is built for Windows; this platform runs `cargo test` only.");
 }
 
 #[cfg(windows)]

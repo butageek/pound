@@ -49,20 +49,20 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
 
 ## Features
 
-- Opens `.md` / `.markdown` files from double-click, drag-and-drop, `Open…`,
-  or the command line (`pound file.md`).
+- **Browser-grade rendering**: the markdown pane is an embedded WebView2
+  — the same class of engine VSCode's preview uses — with a GitHub-style
+  stylesheet (token set borrowed from
+  [ColaMD](https://github.com/marswaveai/ColaMD)) and native Segoe UI /
+  Consolas typography. Light & dark themes follow the system.
+- Opens `.md` / `.markdown` files from double-click, drag-and-drop,
+  `Open…`, or the command line (`pound file.md`).
 - **Rendered view by default**, with a **Source toggle** that opens a
-  side-by-side panel showing the raw markdown (resizable, monospaced).
-  Shortcut: `Ctrl+U`.
-- Native Windows typography: **Segoe UI** (the system sans-serif, same
-  as VSCode's markdown preview) with true bold, and **Consolas** for code
-  blocks — loaded from the OS at runtime, never redistributed.
-- Headings, emphasis, **real bold weight**, inline code, code blocks (with
-  copy button), lists, task lists, blockquotes, tables, rules, links
-  (opened in your browser), and inline HTML formatting
-  (`<b>`, `<strong>`, `<em>`, `<u>`, `<s>`, `<code>`, `<br>`).
-- Local images referenced from a document are rendered.
-- Auto-reloads when the file changes on disk.
+  side-by-side panel showing the raw markdown. Shortcut: `Ctrl+U`.
+- Full CommonMark via pulldown-cmark: tables, task lists, strikethrough,
+  inline HTML (sanitized), local images (served via a custom `poundimg://`
+  protocol), links open in your browser, code blocks have copy buttons.
+- Auto-reloads when the file changes on disk — keeping your reading
+  position.
 - Installs per-user — **no admin rights required**.
 - Registers in the Windows app list (`RegisteredApplications` + ProgId) so
   other apps and the "Open with" / "Default apps" dialogs can find it.
@@ -71,19 +71,24 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
 
 | Layer | File | Responsibility |
 |---|---|---|
-| Model | `src/model.rs` | App state: open document, source toggle, errors, reload revision. No UI types. |
-| Model (parsing) | `src/markdown.rs` | pulldown-cmark events → neutral `Block`/`Inline` tree. Unit-tested without a GUI. |
+| Model | `src/model.rs` | App state: open document (source + rendered HTML), source toggle, errors, reload revision. No UI types. |
+| Rendering input | `src/markdown.rs` | pulldown-cmark → HTML; rewrites local images to `poundimg://`; sanitizes with ammonia. Unit-tested headlessly. |
 | Presenter | `src/presenter.rs` | User intents: open/reload/toggle, drag-and-drop routing, link opening. Owns the Model. |
-| View | `src/view.rs` | egui/eframe rendering; forwards events to the presenter, renders its model. |
+| View | `src/view.rs` | WebView2 shell (tao + wry): top bar, rendered pane, source pane. Displays the model, forwards intents. |
 | Windows glue | `src/register.rs` | Registry integration (`register` / `unregister` subcommands). |
 
 ```
  double-click .md ─┐
- drag & drop ──────┤        ┌──────────┐   intents   ┌────────────┐   state ┌───────┐
- Open… button ─────┼──────► │   View   │ ──────────► │ Presenter  │ ──────► │ Model │
- Ctrl+U toggle ────┘        │ (egui)   │ ◄────────── │            │ ◄────── │       │
-                            └──────────┘   render    └────────────┘        └───────┘
+ drag & drop ──────┤        ┌─────────────────┐  intents   ┌────────────┐ state ┌───────┐
+ Open… button ─────┼─────► │  View           │ ─────────► │ Presenter  │ ────► │ Model │
+ Ctrl+U toggle ────┘       │  (WebView2/wry) │ ◄───────── │            │ ◄───  │       │
+                            └─────────────────┘  HTML push └────────────┘       └───────┘
 ```
+
+Rendering happens in a real browser engine (WebView2), the same approach
+that gives VSCode's preview and
+[ColaMD](https://github.com/marswaveai/ColaMD) their quality — markdown is
+turned into HTML+CSS instead of being hand-laid-out by the GUI toolkit.
 
 ## Using it
 

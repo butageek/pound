@@ -4,13 +4,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::markdown::{self, Block};
+use crate::markdown;
 
-/// A loaded markdown document: source text plus its parsed block tree.
+/// A loaded markdown document: source text plus its rendered HTML.
 pub struct Document {
     pub path: PathBuf,
     pub source: String,
-    pub blocks: Vec<Block>,
+    pub html: String,
     pub modified: Option<SystemTime>,
 }
 
@@ -23,7 +23,7 @@ impl Document {
             .map_err(|e| format!("cannot read {}: {e}", absolute.display()))?;
         let modified = fs::metadata(&absolute).and_then(|m| m.modified()).ok();
         Ok(Document {
-            blocks: markdown::parse(&source),
+            html: markdown::to_html(&source, absolute.parent().unwrap_or(Path::new("."))),
             path: absolute,
             source,
             modified,
@@ -36,14 +36,6 @@ impl Document {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "untitled".to_string())
-    }
-
-    /// Directory of the document, for resolving relative image paths.
-    pub fn dir(&self) -> PathBuf {
-        self.path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default()
     }
 }
 
@@ -128,13 +120,15 @@ mod tests {
     }
 
     #[test]
-    fn open_loads_and_parses() {
-        let path = temp_md("doc.md", "# Hello\n\nworld");
+    fn open_loads_and_renders_html() {
+        let path = temp_md("doc.md", "# Hello\n\nworld **bold**");
         let mut model = Model::default();
         model.open(&path);
         let doc = model.document.as_ref().expect("document loaded");
         assert_eq!(doc.name(), "doc");
-        assert!(matches!(doc.blocks[0], Block::Heading { level: 1, .. }));
+        assert_eq!(doc.source, "# Hello\n\nworld **bold**");
+        assert!(doc.html.contains("<h1>Hello</h1>"));
+        assert!(doc.html.contains("<strong>bold</strong>"));
         assert_eq!(model.error, None);
         assert_eq!(model.revision, 1);
     }
@@ -164,7 +158,7 @@ mod tests {
         model.open(&path);
         assert!(!model.reload_if_changed());
 
-        std::fs::write(&path, "# v2").unwrap();
+        fs::write(&path, "# v2").unwrap();
         // Bump mtime explicitly (some filesystems share the timestamp).
         let later = SystemTime::now() + Duration::from_secs(5);
         let f = fs::File::options().write(true).open(&path).unwrap();
@@ -173,7 +167,7 @@ mod tests {
 
         assert!(model.reload_if_changed());
         let doc = model.document.as_ref().unwrap();
-        assert!(matches!(doc.blocks[0], Block::Heading { level: 1, .. }));
+        assert!(doc.html.contains("<h1>v2</h1>"));
         assert_eq!(model.revision, 2);
     }
 }

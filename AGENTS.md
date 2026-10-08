@@ -6,7 +6,7 @@ same conventions.)
 
 ## What this is
 
-Pound is a markdown reader for Windows written in Rust (eframe/egui +
+Pound is a markdown reader for Windows written in Rust (tao + wry +
 pulldown-cmark). It renders `.md` files by default and can show the raw
 source side by side (Ctrl+U). Architecture is strict MVP
 (Model–View–Presenter) — keep it that way:
@@ -14,46 +14,51 @@ source side by side (Ctrl+U). Architecture is strict MVP
 | Layer | File | Rule |
 |---|---|---|
 | Model | `src/model.rs` | state only, no UI types |
-| Parsing | `src/markdown.rs` | pulldown-cmark events → neutral `Block`/`Inline` tree, unit-tested headlessly |
-| Presenter | `src/presenter.rs` | intents/use-cases, owns the Model, no egui types |
-| View | `src/view.rs` | egui rendering only; forwards events to the presenter |
+| Rendering input | `src/markdown.rs` | pulldown-cmark → sanitized HTML, unit-tested headlessly |
+| Presenter | `src/presenter.rs` | intents/use-cases, owns the Model, no GUI types |
+| View | `src/view.rs` | WebView2 shell (tao + wry): shell HTML/CSS/JS, JS bridge; forwards intents to the presenter |
 | Windows glue | `src/register.rs` | HKCU registry: app-list registration + `.md` association |
 
 ## Environment
 
-- Development happens on Linux/WSL; the shipped binary is Windows.
+- Development happens on Linux/WSL; the shipped binary is Windows. The GUI
+  (tao/wry/rfd) is `[target.'cfg(windows)'.dependencies]`-gated, so Linux
+  hosts run `cargo test` only and cannot open the GUI.
 - Windows type-checking needs the target: `rustup target add x86_64-pc-windows-msvc`
   (or `x86_64-pc-windows-gnu` for full cross-builds — needs `mingw-w64` for
-  linking *and* the icon's windres).
-- The exe icon (`assets/pound.ico`) is regenerated with `python3 tools/gen_icon.py`
-  (stdlib only, no PIL).
+  linking *and* the icon's windres). WebView2 ships with Windows 10/11.
+- The exe icon (`assets/pound.ico`, window icon `assets/pound.png`) is
+  regenerated with `python3 tools/gen_icon.py` (stdlib only, no PIL).
 
 ## Rendering notes
 
-- **Fonts**: on Windows the app loads the system sans-serif — Segoe UI
-  (regular + true bold) and Consolas for code — straight from
-  `%WINDIR%\Fonts` at runtime (`load_system_font` in `view.rs`); Segoe UI
-  is licensed to the OS, so it must never be committed to the repo. On
-  non-Windows machines it falls back to egui's Ubuntu-Light plus the
-  bundled `assets/fonts/Ubuntu-Bold.ttf`.
-- egui's bundled fonts have **no bold weight** and `RichText::strong()` only
-  strengthens the COLOR. Real bold comes from the `pound-bold` font family
-  (`install_fonts`/`font_definitions` in `view.rs`), selected via `FontId`
-  in `text_format`.
-- Inline text renders as one `LayoutJob` galley per paragraph (word spacing,
-  `line_height`, inline code backgrounds, underline/strike); links are
-  hit-tested via `cursor_from_pos(...).index` — a CHARACTER offset, so link
-  spans are tracked in chars, not bytes.
-- Code chips: monospace fonts have much shorter ascents than Segoe UI, so
-  code runs use the font's natural line height (no shared row pitch) plus
-  centered valign — otherwise the chip's baseline floats noticeably high.
-- Tables avoid `egui::Grid` on purpose: Grid measures cells with a tiny
-  available width, which collapses pre-wrapped galleys into
-  one-character-per-line and gigantic rows. `render_table` measures each
-  cell's natural single-line width, fits columns into the available width
-  (HTML width:100% style), and lays out rows manually.
-- `markdown.rs` maps common inline-HTML formatting tags onto style flags
-  (`inline_html_tag`); unknown tags are ignored, `<br>` is a hard break.
+- The markdown pane is an **embedded WebView2** (`wry`) — the same class of
+  browser engine VSCode's preview uses. Markdown → HTML (pulldown-cmark) →
+  CSS; we deliberately do NOT hand-roll text layout (the egui era taught us
+  baselines, code chips and tables are an endless whack-a-mole). Approach
+  borrowed from [ColaMD](https://github.com/marswaveai/ColaMD) (Electron +
+  DOM/CSS) whose theme tokens we also use.
+- ColaMD's philosophy applies here too: "the file's bytes are the truth;
+  rendering is a layer; when rendering fails, fall back to source, never
+  eat content."
+- Rust → JS: `push_document` evaluates `pound.setContent(html, source,
+  title, path)` + `pound.setError(msg)` — strings JSON-escaped by `json_str`
+  (quoting only; XSS is handled by ammonia).
+- JS → Rust: toolbar buttons navigate to `pound://open|reload|dismiss-error`,
+  intercepted by the navigation handler which calls presenter intents.
+  http(s)/mailto links are opened externally and never navigate the reader.
+- Local images: `markdown.rs` rewrites relative srcs to percent-encoded
+  `poundimg://<abs path>`; the view serves them from disk via a custom
+  protocol. Unknown/missing files keep their src (broken-image marker).
+- **ammonia sanitizes all HTML** — markdown files can embed raw HTML and
+  file content must never execute (scripts/handlers/styling stripped).
+  `poundimg`/`data` URL schemes must be in ammonia's allowlist or image
+  srcs silently vanish.
+- Shell HTML/CSS/JS lives in `SHELL_HTML` in `view.rs`. To preview/verify it
+  in a browser: `cargo test dump_rendered_sample -- --ignored`, then compose
+  `/tmp/pound-preview.html` from the shell const + the dumped content (see
+  git history for the recipe) and open it with agent-browser.
+
 
 ## Commands
 
@@ -114,9 +119,11 @@ Windows cross-check).
 ## Debugging
 
 - `pound --help` / `pound --version` print to the console (AttachConsole).
-- `pound file.md` on a headless Linux box fails in winit with
-  "neither WAYLAND_DISPLAY nor DISPLAY is set" — that is expected; use a
-  Windows machine or X server for GUI testing.
+- The GUI runs on Windows only; on Linux, non-Windows hosts print a notice.
+  Verify the shell/rendering in any browser via the `dump_rendered_sample`
+  recipe in Rendering notes.
+- Debug builds open WebView2 devtools automatically (`with_devtools` in
+  `view.rs`) — right-click → Inspect in the app.
 - Registry state to inspect when file association misbehaves:
   `HKCU\Software\Classes\.md`, `HKCU\Software\Classes\Pound.md`,
   `HKCU\Software\RegisteredApplications`,
