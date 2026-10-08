@@ -41,12 +41,9 @@ source side by side (Ctrl+U). Architecture is strict MVP
 - The markdown pane is an **embedded WebView2** (`wry`) — the same class of
   browser engine VSCode's preview uses. Markdown → HTML (pulldown-cmark) →
   CSS; we deliberately do NOT hand-roll text layout (the egui era taught us
-  baselines, code chips and tables are an endless whack-a-mole). Approach
-  borrowed from [ColaMD](https://github.com/marswaveai/ColaMD) (Electron +
-  DOM/CSS) whose theme tokens we also use.
-- ColaMD's philosophy applies here too: "the file's bytes are the truth;
-  rendering is a layer; when rendering fails, fall back to source, never
-  eat content."
+  baselines, code chips and tables are an endless whack-a-mole).
+- Guiding principle: "the file's bytes are the truth; rendering is a
+  layer; when rendering fails, fall back to source, never eat content."
 - Rust → JS: `push_document` evaluates `pound.setContent(html, source,
   title, path)` + `pound.setError(msg)` — strings JSON-escaped by `json_str`
   (quoting only; XSS is handled by ammonia).

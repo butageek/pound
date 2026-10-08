@@ -9,8 +9,7 @@
 //!   text, title and errors as JSON-escaped strings.
 //! - JS -> Rust: the toolbar navigates to `pound://…` URLs, which the
 //!   navigation handler intercepts and turns into presenter intents.
-//! - Local images are served through the `poundimg://` custom protocol
-//!   (like ColaMD's portable file:// image mapping).
+//! - Local images are served through the `poundimg://` custom protocol.
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -248,8 +247,8 @@ fn window_icon() -> Option<tao::window::Icon> {
 
 // ---------------------------------------------------------------------------
 // The shell document: top bar, rendered pane, source pane. The markdown
-// styles use the token set borrowed from ColaMD's themes (GitHub-derived
-// palette) with a Segoe UI / Consolas stack for native Windows typography.
+// styles use a GitHub-derived palette with a Segoe UI / Consolas stack for
+// native Windows typography.
 // ---------------------------------------------------------------------------
 
 const SHELL_HTML: &str = r#"<!doctype html>
@@ -356,7 +355,7 @@ const SHELL_HTML: &str = r#"<!doctype html>
     font-family: Consolas, monospace; font-size: 12.5px;
   }
 
-  /* ---- markdown content (GitHub/ColaMD token set) ---- */
+  /* ---- markdown content (GitHub-style token set) ---- */
   #content {
     /* Full pane width like VSCode's preview (no centered reading column). */
     padding: 26px 40px 120px;

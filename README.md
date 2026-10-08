@@ -51,9 +51,8 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
 
 - **Browser-grade rendering**: the markdown pane is an embedded WebView2
   — the same class of engine VSCode's preview uses — with a GitHub-style
-  stylesheet (token set borrowed from
-  [ColaMD](https://github.com/marswaveai/ColaMD)) and native Segoe UI /
-  Consolas typography. Light & dark themes follow the system.
+  stylesheet and native Segoe UI / Consolas typography. Light & dark
+  themes follow the system.
 - Opens `.md` / `.markdown` files from double-click, drag-and-drop,
   `Open…`, or the command line (`pound file.md`).
 - **Rendered view by default**, with a **Source toggle** that opens a
@@ -85,10 +84,9 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
                             └─────────────────┘  HTML push └────────────┘       └───────┘
 ```
 
-Rendering happens in a real browser engine (WebView2), the same approach
-that gives VSCode's preview and
-[ColaMD](https://github.com/marswaveai/ColaMD) their quality — markdown is
-turned into HTML+CSS instead of being hand-laid-out by the GUI toolkit.
+Rendering happens in a real browser engine (WebView2) — the same
+approach that gives VSCode's preview its quality — markdown is turned
+into HTML+CSS instead of being hand-laid-out by the GUI toolkit.
 
 ## Using it
 

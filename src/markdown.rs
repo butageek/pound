@@ -5,11 +5,10 @@
 //! This module turns the markdown source into that HTML:
 //!
 //! - pulldown-cmark generates the HTML (tables, task lists, strikethrough…)
-//! - local image `src`s are rewritten to the `poundimg://` custom protocol
-//!   (served from disk by the view layer, like ColaMD's `file://` mapping)
+//! - local image `src`s are rewritten to the `poundimg://` custom protocol,
+//!   served from disk by the view layer
 //! - the result is sanitized with ammonia: markdown files can contain raw
-//!   HTML, and file content must never execute in the reader (borrowed
-//!   lesson from ColaMD's architecture notes).
+//!   HTML, and file content must never execute in the reader
 
 use std::path::Path;
 
