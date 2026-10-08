@@ -48,16 +48,20 @@ jobs:
             } > release-notes.md
           fi
 
-      - name: Create GitHub Release with the zip attached
+      - name: Create (or update) the GitHub Release with the zip attached
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Idempotent: re-pushing/moving a tag updates the existing release
+          # instead of failing on the name conflict.
+          NOTES_ARGS=(--title "Pound ${GITHUB_REF_NAME}")
           if [ -s release-notes.md ]; then
-            gh release create "${GITHUB_REF_NAME}" dist/*.zip \
-              --title "Pound ${GITHUB_REF_NAME}" \
-              --notes-file release-notes.md
+            NOTES_ARGS+=(--notes-file release-notes.md)
           else
-            gh release create "${GITHUB_REF_NAME}" dist/*.zip \
-              --title "Pound ${GITHUB_REF_NAME}" \
-              --generate-notes
+            NOTES_ARGS+=(--generate-notes)
+          fi
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/*.zip --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/*.zip "${NOTES_ARGS[@]}"
           fi
