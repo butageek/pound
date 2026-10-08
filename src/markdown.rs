@@ -68,22 +68,17 @@ fn localize_image(url: &str, base_dir: &Path) -> String {
     }
 }
 
-/// Percent-encode everything outside the URI unreserved set so spaces,
-/// `#`, `?` etc. in file paths survive the URL round-trip.
+/// Percent-encode everything outside the URI unreserved set. The path is
+/// carried as one opaque percent-encoded blob: Windows canonical paths
+/// (`\\\\?\\C:\\…`) would otherwise put the drive colon inside the URL
+/// authority, which fails URL parsing and makes ammonia strip the src.
 fn percent_encode(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     for byte in path.bytes() {
         match byte {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'_'
-            | b'.'
-            | b'~'
-            | b':'
-            | b'\\'
-            | b'/' => out.push(byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
             _ => out.push_str(&format!("%{byte:02X}")),
         }
     }
