@@ -28,7 +28,6 @@ const HEADING_SIZES: [f32; 6] = [28.0, 22.0, 19.0, 17.0, 15.0, 14.0];
 /// Custom font family holding the bold weight. egui's bundled fonts only
 /// include Ubuntu-Light, so bold runs select this family instead.
 const BOLD_FAMILY: &str = "pound-bold";
-
 /// Base text style for a group of runs (heading size, quote dimming…).
 #[derive(Clone, Copy)]
 struct TextBase {
@@ -81,32 +80,87 @@ impl AppView {
     }
 }
 
-/// Install a real bold weight. egui's bundled proportional font is only
-/// Ubuntu-Light, and `RichText::strong()` just picks a slightly stronger
-/// COLOR — without this, `**bold**` renders identical to regular text.
-/// We ship Ubuntu-Bold (same typeface + license egui bundles) under a
-/// dedicated family that [`text_format`] selects for bold runs.
+/// Install the reading fonts. On Windows we prefer the system sans-serif
+/// — **Segoe UI** (the same font VSCode's markdown preview uses on
+/// Windows), with its true bold weight, plus Consolas for code. These are
+/// loaded from the OS at runtime and never redistributed with the app.
+/// Elsewhere (Linux dev machines) we fall back to egui's defaults plus a
+/// bundled Ubuntu-Bold so real bold still renders.
 fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(font_definitions());
 }
 
+/// Load a font that ships with Windows (e.g. `segoeui.ttf`) from the system
+/// fonts directory. Returns `None` when unavailable (non-Windows or odd
+/// installs) so callers can fall back.
+fn load_system_font(name: &str) -> Option<Vec<u8>> {
+    let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".to_owned());
+    std::fs::read(format!(r"{windir}\Fonts\{name}")).ok()
+}
+
 fn font_definitions() -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert(
-        "pound-ubuntu-bold".to_owned(),
-        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
-            "../assets/fonts/Ubuntu-Bold.ttf"
-        ))),
-    );
-    fonts.families.insert(
-        egui::FontFamily::Name(BOLD_FAMILY.into()),
-        vec![
-            "pound-ubuntu-bold".to_owned(),
-            "Ubuntu-Light".to_owned(), // glyph fallback
-            "NotoEmoji-Regular".to_owned(),
-            "emoji-icon-font".to_owned(),
-        ],
-    );
+
+    match (
+        load_system_font("segoeui.ttf"),
+        load_system_font("segoeuib.ttf"),
+    ) {
+        (Some(regular), Some(bold)) => {
+            fonts.font_data.insert(
+                "segoe-ui".to_owned(),
+                std::sync::Arc::new(egui::FontData::from_owned(regular)),
+            );
+            fonts.font_data.insert(
+                "segoe-ui-bold".to_owned(),
+                std::sync::Arc::new(egui::FontData::from_owned(bold)),
+            );
+            fonts.families.insert(
+                egui::FontFamily::Proportional,
+                vec![
+                    "segoe-ui".to_owned(),
+                    "NotoEmoji-Regular".to_owned(),
+                    "emoji-icon-font".to_owned(),
+                ],
+            );
+            fonts.families.insert(
+                egui::FontFamily::Name(BOLD_FAMILY.into()),
+                vec![
+                    "segoe-ui-bold".to_owned(),
+                    "segoe-ui".to_owned(), // glyph fallback
+                    "NotoEmoji-Regular".to_owned(),
+                    "emoji-icon-font".to_owned(),
+                ],
+            );
+            if let Some(consolas) = load_system_font("consola.ttf") {
+                fonts.font_data.insert(
+                    "consolas".to_owned(),
+                    std::sync::Arc::new(egui::FontData::from_owned(consolas)),
+                );
+                if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+                    mono.insert(0, "consolas".to_owned());
+                }
+            }
+        }
+        _ => {
+            // Fallback: egui's default Ubuntu-Light plus the bundled
+            // Ubuntu-Bold (same typeface + license) for real bold.
+            fonts.font_data.insert(
+                "pound-ubuntu-bold".to_owned(),
+                std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+                    "../assets/fonts/Ubuntu-Bold.ttf"
+                ))),
+            );
+            fonts.families.insert(
+                egui::FontFamily::Name(BOLD_FAMILY.into()),
+                vec![
+                    "pound-ubuntu-bold".to_owned(),
+                    "Ubuntu-Light".to_owned(), // glyph fallback
+                    "NotoEmoji-Regular".to_owned(),
+                    "emoji-icon-font".to_owned(),
+                ],
+            );
+        }
+    }
     fonts
 }
 
@@ -632,8 +686,14 @@ fn image_placeholder(ui: &mut Ui, alt: &str, url: &str) {
 mod tests {
     use super::*;
 
-    /// Headless smoke test: the bundled Ubuntu-Bold parses through egui's
-    /// font stack and bold-family text lays out to a non-empty galley.
+    #[test]
+    fn missing_system_font_returns_none() {
+        assert!(load_system_font("definitely-not-a-real-font.ttf").is_none());
+    }
+
+    /// Headless smoke test: whichever path `font_definitions` takes (Segoe
+    /// UI on Windows, bundled Ubuntu elsewhere), the bold family parses
+    /// through egui's font stack and lays out to a non-empty galley.
     #[test]
     fn bold_font_lays_out() {
         let fonts = egui::text::Fonts::new(

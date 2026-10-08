@@ -30,10 +30,16 @@ source side by side (Ctrl+U). Architecture is strict MVP
 
 ## Rendering notes
 
+- **Fonts**: on Windows the app loads the system sans-serif — Segoe UI
+  (regular + true bold) and Consolas for code — straight from
+  `%WINDIR%\Fonts` at runtime (`load_system_font` in `view.rs`); Segoe UI
+  is licensed to the OS, so it must never be committed to the repo. On
+  non-Windows machines it falls back to egui's Ubuntu-Light plus the
+  bundled `assets/fonts/Ubuntu-Bold.ttf`.
 - egui's bundled fonts have **no bold weight** and `RichText::strong()` only
-  strengthens the COLOR. Real bold comes from `assets/fonts/Ubuntu-Bold.ttf`,
-  installed under the `pound-bold` family (`install_fonts` in `view.rs`) and
-  selected via `FontId` in `text_format`.
+  strengthens the COLOR. Real bold comes from the `pound-bold` font family
+  (`install_fonts`/`font_definitions` in `view.rs`), selected via `FontId`
+  in `text_format`.
 - Inline text renders as one `LayoutJob` galley per paragraph (word spacing,
   `line_height`, inline code backgrounds, underline/strike); links are
   hit-tested via `cursor_from_pos(...).index` — a CHARACTER offset, so link

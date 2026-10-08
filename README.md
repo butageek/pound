@@ -50,6 +50,9 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
 - **Rendered view by default**, with a **Source toggle** that opens a
   side-by-side panel showing the raw markdown (resizable, monospaced).
   Shortcut: `Ctrl+U`.
+- Native Windows typography: **Segoe UI** (the system sans-serif, same
+  as VSCode's markdown preview) with true bold, and **Consolas** for code
+  blocks — loaded from the OS at runtime, never redistributed.
 - Headings, emphasis, **real bold weight**, inline code, code blocks (with
   copy button), lists, task lists, blockquotes, tables, rules, links
   (opened in your browser), and inline HTML formatting
