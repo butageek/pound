@@ -27,6 +27,10 @@ This downloads the latest release build from GitHub, copies it to
 and registers Pound with Windows so `.md` files can open with it. Then
 right-click any `.md` file → **Open with** → **Pound** (tick *Always*).
 
+**Upgrades use the exact same command** — it detects an existing install,
+closes a running Pound (gracefully, then forcefully), replaces the exe,
+re-registers, and prints the new version.
+
 To make Pound the default `.md` handler in the same step:
 
 ```powershell

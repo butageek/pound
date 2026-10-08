@@ -66,6 +66,43 @@ if ($InstallDir -eq (Join-Path $env:LOCALAPPDATA 'Pound')) {
 
 function Write-Step([string]$msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 
+# Close any Pound windows running from the given exe path so the file can
+# be replaced (Windows locks a running executable). Graceful close first,
+# force-terminate after a short grace period. Used by upgrades/uninstalls.
+function Stop-PoundProcesses {
+    param([string]$ExePath)
+    $procs = @()
+    try {
+        $procs = @(Get-Process -Name 'pound' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Path -eq $ExePath })
+    }
+    catch { $procs = @() }
+    if ($procs.Count -eq 0) { return }
+
+    Write-Host "  closing running Pound ($($procs.Count) window(s))" -ForegroundColor DarkGray
+    foreach ($p in $procs) {
+        try { $null = $p.CloseMainWindow() } catch { }
+    }
+    $left = $procs.Count
+    $deadline = (Get-Date).AddSeconds(5)
+    while ($left -gt 0 -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 250
+        try {
+            $left = @(Get-Process -Name 'pound' -ErrorAction SilentlyContinue |
+                Where-Object { $_.Path -eq $ExePath }).Count
+        }
+        catch { $left = 0 }
+    }
+    if ($left -gt 0) {
+        try {
+            Get-Process -Name 'pound' -ErrorAction SilentlyContinue |
+                Where-Object { $_.Path -eq $ExePath } | Stop-Process -Force -ErrorAction SilentlyContinue
+        }
+        catch { }
+    }
+    Start-Sleep -Milliseconds 300 # let the OS release the file handle
+}
+
 function Get-GithubLatestAsset {
     param([string]$OwnerRepo)
     Write-Step "Looking up the latest release of $OwnerRepo"
@@ -129,9 +166,16 @@ $BinaryPath = (Resolve-Path $BinaryPath).Path
 Write-Step "Using binary: $BinaryPath"
 
 # --------------------------------------------------------------- install ---
-Write-Step "Installing to $InstallDir"
+$isUpgrade = Test-Path -LiteralPath (Join-Path $InstallDir 'pound.exe')
+if ($isUpgrade) {
+    Write-Step 'Upgrading existing installation'
+}
+else {
+    Write-Step "Installing to $InstallDir"
+}
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 $targetExe = Join-Path $InstallDir 'pound.exe'
+Stop-PoundProcesses -ExePath $targetExe
 Copy-Item -Path $BinaryPath -Destination $targetExe -Force
 
 # Start Menu shortcut (puts Pound in the system app list for the Start menu).
@@ -157,8 +201,7 @@ if (-not $NoPath) {
 }
 
 # ------------------------------------------------------------ register ----
-if (-not $NoRegister) {
-    Write-Step 'Registering Pound with Windows (HKCU only, no admin needed)'
+if (-not $NoRegister) {    Write-Step 'Registering Pound with Windows (HKCU only, no admin needed)'
 
     # pound.exe is a GUI-subsystem binary (no console flash when opening
     # .md files). PowerShell's call operator does NOT wait for GUI-subsystem
@@ -183,8 +226,28 @@ if (-not $NoRegister) {
     try { Remove-Item -LiteralPath $outLog, $errLog -ErrorAction SilentlyContinue } catch { }
 }
 
+# Best-effort version confirmation (never fails the install).
+try {
+    $verOut = Join-Path $TempRoot ("pound-version-" + [guid]::NewGuid().ToString('N') + '.txt')
+    $verErr = Join-Path $TempRoot ("pound-version-err-" + [guid]::NewGuid().ToString('N') + '.txt')
+    $vp = Start-Process -FilePath $targetExe -ArgumentList @('--version') `
+        -Wait -PassThru -RedirectStandardOutput $verOut -RedirectStandardError $verErr
+    $versionText = ''
+    if (Test-Path -LiteralPath $verOut) { $versionText = (Get-Content -LiteralPath $verOut -Raw -ErrorAction SilentlyContinue) }
+    try { Remove-Item -LiteralPath $verOut, $verErr -ErrorAction SilentlyContinue } catch { }
+    if ($vp.ExitCode -eq 0 -and $versionText) {
+        Write-Host ("Installed: " + $versionText.Trim()) -ForegroundColor Green
+    }
+}
+catch { }
+
 Write-Host ''
-Write-Host 'Pound installed.' -ForegroundColor Green
+if ($isUpgrade) {
+    Write-Host 'Pound upgraded.' -ForegroundColor Green
+}
+else {
+    Write-Host 'Pound installed.' -ForegroundColor Green
+}
 if (-not $NoRegister -and -not $SetDefault) {
     Write-Host 'Next: right-click a .md file > "Open with" > choose Pound (tick "Always").'
     Write-Host '      Or re-run the installer with -SetDefault.'

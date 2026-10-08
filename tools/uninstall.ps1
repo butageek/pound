@@ -19,7 +19,44 @@ if (-not (Test-Path -LiteralPath $InstallDir)) {
 
 function Write-Step([string]$msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 
+# Close any Pound windows running from the given exe path so the install
+# folder can be removed (Windows locks a running executable).
+function Stop-PoundProcesses {
+    param([string]$ExePath)
+    $procs = @()
+    try {
+        $procs = @(Get-Process -Name 'pound' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Path -eq $ExePath })
+    }
+    catch { $procs = @() }
+    if ($procs.Count -eq 0) { return }
+
+    Write-Host "  closing running Pound ($($procs.Count) window(s))" -ForegroundColor DarkGray
+    foreach ($p in $procs) {
+        try { $null = $p.CloseMainWindow() } catch { }
+    }
+    $left = $procs.Count
+    $deadline = (Get-Date).AddSeconds(5)
+    while ($left -gt 0 -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 250
+        try {
+            $left = @(Get-Process -Name 'pound' -ErrorAction SilentlyContinue |
+                Where-Object { $_.Path -eq $ExePath }).Count
+        }
+        catch { $left = 0 }
+    }
+    if ($left -gt 0) {
+        try {
+            Get-Process -Name 'pound' -ErrorAction SilentlyContinue |
+                Where-Object { $_.Path -eq $ExePath } | Stop-Process -Force -ErrorAction SilentlyContinue
+        }
+        catch { }
+    }
+    Start-Sleep -Milliseconds 300 # let the OS release the file handle
+}
+
 $targetExe = Join-Path $InstallDir 'pound.exe'
+Stop-PoundProcesses -ExePath $targetExe
 
 # -------------------------------------------------- unregister (registry) --
 if (Test-Path $targetExe) {

@@ -86,7 +86,9 @@ Windows cross-check).
   if the "choose an app" dialog still appears, the user picks Pound once
   with "Always". Platform restriction, not a bug.
 - `install.ps1` copies the exe to `%LOCALAPPDATA%\Pound`, adds a Start-menu
-  shortcut + user PATH, and calls `pound register`.
+  shortcut + user PATH, and calls `pound register`. The same command
+  upgrades: it closes a running Pound first (Windows locks a running exe)
+  and re-registers idempotently.
 - The binary is built with the GUI subsystem (`windows_subsystem = "windows"`);
   CLI subcommands attach to the parent console for output (unless stdout is
   already a console/pipe/file, so redirection keeps working).

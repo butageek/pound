@@ -35,6 +35,11 @@ side-by-side pane. No admin rights needed anywhere.
    - Ctrl+U or the "Source" checkbox toggles the side-by-side pane.
    - Files reload automatically when saved from another editor.
 
+4. UPGRADING
+
+   Run the same installer command again - it upgrades in place (closing
+   Pound first if it is running) and prints the new version.
+
 Notes
 -----
 - The build is unsigned: SmartScreen may warn the first time
