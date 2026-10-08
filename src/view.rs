@@ -347,7 +347,8 @@ const SHELL_HTML: &str = r#"<!doctype html>
 
   /* ---- markdown content (GitHub/ColaMD token set) ---- */
   #content {
-    max-width: 980px; margin: 0 auto; padding: 26px 32px 120px;
+    /* Full pane width like VSCode's preview (no centered reading column). */
+    padding: 26px 40px 120px;
     font-size: 15.5px; line-height: 1.65;
   }
   #content h1, #content h2, #content h3, #content h4, #content h5, #content h6 {
