@@ -1,0 +1,10 @@
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Pound mark">
+  <!-- strokes use currentColor: set CSS `color` to fit the host design -->
+  <rect x="107" y="110" width="42" height="36" rx="5" fill="#6FA8FF"/>
+  <g fill="currentColor">
+    <rect x="85" y="62" width="22" height="132" rx="11"/>
+    <rect x="149" y="62" width="22" height="132" rx="11"/>
+    <rect x="62" y="90" width="132" height="20" rx="10"/>
+    <rect x="62" y="146" width="132" height="20" rx="10"/>
+  </g>
+</svg>

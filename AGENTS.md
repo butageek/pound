@@ -33,8 +33,11 @@ source side by side (Ctrl+U). Architecture is strict MVP
   `WebView2Loader.dll` dynamically and dies at startup with
   STATUS_DLL_NOT_FOUND (0xC0000135) on user machines — this shipped as
   v0.2.0 and is why the release runner is MSVC.
-- The exe icon (`assets/pound.ico`, window icon `assets/pound.png`) is
-  regenerated with `python3 tools/gen_icon.py` (stdlib only, no PIL).
+- The logo & icon set — `assets/pound.ico` (16–256), `assets/pound.png`,
+  and the SVG/PNG assets under `assets/logo/` — is regenerated with
+  `python3 tools/gen_icon.py` (stdlib only; supersampled anti-aliasing).
+  Design: "the split-view hash" — accent center cell = the active pane.
+  It prints an ASCII preview so geometry can be checked from a terminal.
 
 ## Rendering notes
 

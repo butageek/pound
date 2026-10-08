@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo/pound-icon.svg" width="112" alt="Pound logo">
+</p>
+
 # Pound
 
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -130,7 +134,7 @@ cargo test                                         # unit tests (headless)
 cargo fmt --all && cargo clippy --all-targets      # keep CI green
 cargo check --target x86_64-pc-windows-msvc        # type-check Windows code from any OS
 ./scripts/package.sh                               # cross-build + dist/pound-<ver>-win64.zip
-python3 tools/gen_icon.py                          # regenerate assets/pound.ico (stdlib only)
+python3 tools/gen_icon.py                          # regenerate the logo & icon set (stdlib only)
 ```
 
 On a Windows machine you can also build and install natively:
@@ -159,6 +163,19 @@ exe depending on non-system DLLs), packages the release zip (with
 `QUICK-START.txt` + `LICENSE`) and publishes a GitHub Release with notes
 generated from the commits since the previous tag — which is exactly what
 the install one-liner downloads.
+
+## Logo & icons
+
+The mark is the project's namesake `#` read as the reader's signature
+split view — the center cell is the "active pane". Everything is generated
+by `tools/gen_icon.py` (stdlib only, deterministic):
+
+- `assets/pound.ico` — multi-size Windows application icon (16–256)
+- `assets/pound.png` — window icon used at runtime
+- `assets/logo/pound-icon.svg` + PNGs (512/256/128/64/32) — for reuse in
+  other applications and docs
+- `assets/logo/pound-mark.svg` — transparent mark; strokes use
+  `currentColor`, so it adapts to the host page's text color
 
 ## Roadmap
 
