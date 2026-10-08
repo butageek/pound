@@ -110,36 +110,6 @@ fn font_definitions() -> egui::FontDefinitions {
     fonts
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Headless smoke test: the bundled Ubuntu-Bold parses through egui's
-    /// font stack and bold-family text lays out to a non-empty galley.
-    #[test]
-    fn bold_font_lays_out() {
-        let fonts = egui::text::Fonts::new(
-            1.0,
-            8192,
-            egui::epaint::AlphaFromCoverage::LIGHT_MODE_DEFAULT,
-            font_definitions(),
-        );
-
-        let mut job = LayoutJob::default();
-        job.append(
-            "bold text",
-            0.0,
-            TextFormat {
-                font_id: egui::FontId::new(14.0, egui::FontFamily::Name(BOLD_FAMILY.into())),
-                ..Default::default()
-            },
-        );
-        let galley = fonts.layout_job(job);
-        assert!(galley.size().x > 0.0, "bold galley should have width");
-        assert!(galley.size().y > 0.0, "bold galley should have height");
-    }
-}
-
 impl eframe::App for AppView {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // --- input: drag & drop + external file changes --------------------
@@ -656,4 +626,34 @@ fn image_placeholder(ui: &mut Ui, alt: &str, url: &str) {
         .monospace()
         .background_color(ui.visuals().code_bg_color);
     ui.label(chip).on_hover_text(url);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Headless smoke test: the bundled Ubuntu-Bold parses through egui's
+    /// font stack and bold-family text lays out to a non-empty galley.
+    #[test]
+    fn bold_font_lays_out() {
+        let fonts = egui::text::Fonts::new(
+            1.0,
+            8192,
+            egui::epaint::AlphaFromCoverage::LIGHT_MODE_DEFAULT,
+            font_definitions(),
+        );
+
+        let mut job = LayoutJob::default();
+        job.append(
+            "bold text",
+            0.0,
+            TextFormat {
+                font_id: egui::FontId::new(14.0, egui::FontFamily::Name(BOLD_FAMILY.into())),
+                ..Default::default()
+            },
+        );
+        let galley = fonts.layout_job(job);
+        assert!(galley.size().x > 0.0, "bold galley should have width");
+        assert!(galley.size().y > 0.0, "bold galley should have height");
+    }
 }
