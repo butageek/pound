@@ -17,8 +17,14 @@ TARGET="${1:-x86_64-pc-windows-msvc}"
 VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
 TARGET_DIR="target/$TARGET/release"
 STAGE="dist/pound-$VERSION-win64"
+# `zip` is not everywhere; python's zipfile is. Windows runners expose
+# `python`, Unix hosts `python3`.
+PY="$(command -v python3 || command -v python)"
 
 echo "==> Building pound $VERSION for $TARGET"
+# Statically link the MSVC CRT (VCRUNTIME140.dll must not be a runtime
+# dependency; user machines may not have the VC redistributable).
+export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+crt-static"
 cargo build --release --target "$TARGET"
 
 rm -rf "$STAGE"
@@ -27,9 +33,9 @@ cp "$TARGET_DIR/pound.exe" "$STAGE/"
 cp resources/quick-start.txt "$STAGE/QUICK-START.txt"
 cp LICENSE "$STAGE/"
 
-# `zip` is not everywhere; python's zipfile is. Windows runners expose
-# `python`, Unix hosts `python3`.
-PY="$(command -v python3 || command -v python)"
+# Refuse to ship an exe that needs DLLs we don't bundle (see header).
+"$PY" scripts/check_dll_imports.py "$STAGE/pound.exe"
+
 rm -f "$STAGE.zip"
 "$PY" - "$STAGE" <<'EOF'
 import pathlib, sys, zipfile
