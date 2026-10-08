@@ -321,11 +321,21 @@ const SHELL_HTML: &str = r#"<!doctype html>
   #error span { overflow-wrap: anywhere; }
 
   /* ---- main panes ---- */
-  #main { display: flex; height: calc(100vh - 44px); margin-top: 44px; }
-  #content-wrap { flex: 1; overflow-y: auto; }
+  /* 50/50 split: both panes are flex-basis-0 equal-grow siblings, so they
+     always divide the available width exactly in half at any window size.
+     The 1px divider lives in the container gap (not inside a pane) and
+     scrollbar-gutter keeps a scrolling pane from becoming narrower. */
+  #main {
+    display: flex; height: calc(100vh - 44px); margin-top: 44px;
+    column-gap: 1px; background: var(--border);
+  }
+  #content-wrap {
+    flex: 1 1 0; min-width: 0;
+    overflow-y: auto; scrollbar-gutter: stable; background: var(--bg);
+  }
   #source-wrap {
-    display: none; width: 42%; min-width: 240px;
-    border-left: 1px solid var(--border); overflow: auto; background: var(--bg);
+    display: none; flex: 1 1 0; min-width: 0;
+    overflow: auto; scrollbar-gutter: stable; background: var(--bg);
   }
   body.split #source-wrap { display: block; }
   #source {
