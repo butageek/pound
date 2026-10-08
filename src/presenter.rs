@@ -1,14 +1,11 @@
 //! Presenter layer: user intents and use-case logic.
 //!
 //! Owns the [`Model`] and exposes the actions the view can request.
-//! Keeping this free of egui types makes the logic unit-testable.
+//! Keeping this free of GUI types makes the logic unit-testable.
 
 use std::path::{Path, PathBuf};
 
 use crate::model::Model;
-
-/// URL schemes we are willing to hand to the OS when a link is clicked.
-const LINK_SCHEMES: [&str; 3] = ["http", "https", "mailto"];
 
 pub struct Presenter {
     pub model: Model,
@@ -27,14 +24,6 @@ impl Presenter {
 
     pub fn open_path(&mut self, path: &Path) {
         self.model.open(path);
-    }
-
-    pub fn toggle_source(&mut self) {
-        self.model.toggle_source();
-    }
-
-    pub fn set_show_source(&mut self, show: bool) {
-        self.model.set_show_source(show);
     }
 
     pub fn dismiss_error(&mut self) {
@@ -67,21 +56,6 @@ impl Presenter {
             return;
         };
         self.open_path(path);
-    }
-
-    /// Open a link from the rendered document in the system browser.
-    pub fn open_link(&mut self, url: &str) {
-        let scheme_ok = url
-            .split_once(':')
-            .map(|(scheme, _)| LINK_SCHEMES.contains(&scheme.to_ascii_lowercase().as_str()))
-            .unwrap_or(false);
-        if !scheme_ok {
-            self.model.error = Some(format!("refusing to open link with unknown scheme: {url}"));
-            return;
-        }
-        if let Err(e) = open::that(url) {
-            self.model.error = Some(format!("could not open {url}: {e}"));
-        }
     }
 }
 
@@ -118,27 +92,21 @@ mod tests {
     }
 
     #[test]
-    fn view_intents_toggle_reload_and_watch() {
+    fn reload_and_watch_are_noops_without_a_document() {
         let mut presenter = Presenter {
             model: Model::default(),
         };
-        presenter.toggle_source();
-        assert!(presenter.model.show_source);
-        presenter.set_show_source(false);
-        assert!(!presenter.model.show_source);
-        // No document open: reload / watch are no-ops, not errors.
         presenter.reload();
         assert!(!presenter.reload_if_changed());
         assert!(presenter.model.error.is_none());
     }
 
     #[test]
-    fn unknown_link_scheme_is_refused() {
+    fn errors_can_be_dismissed() {
         let mut presenter = Presenter {
             model: Model::default(),
         };
-        presenter.open_link("file:///etc/passwd");
-        assert!(presenter.model.error.is_some());
+        presenter.model.error = Some("boom".to_owned());
         presenter.dismiss_error();
         assert!(presenter.model.error.is_none());
     }

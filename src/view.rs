@@ -57,7 +57,7 @@ pub fn run(file: Option<PathBuf>) {
 
     // Paint whatever the initial file (if any) produced.
     push_document(&webview, &shared.borrow());
-    apply_title(&window, &shared.borrow());
+    window.set_title(&current_title(&shared.borrow()));
 
     let mut last_pushed = shared.borrow().model.revision;
     let mut last_title = current_title(&shared.borrow());
@@ -192,10 +192,6 @@ fn current_title(presenter: &Presenter) -> String {
     }
 }
 
-fn apply_title(window: &tao::window::Window, presenter: &Presenter) {
-    window.set_title(&current_title(presenter));
-}
-
 /// Push the model into the page. Kept as one JS call so a reload can restore
 /// the reading scroll position inside one script evaluation.
 fn push_document(webview: &WebView, presenter: &Presenter) {
@@ -319,6 +315,11 @@ const SHELL_HTML: &str = r#"<!doctype html>
     border: 1px solid var(--error-fg);
   }
   #error span { overflow-wrap: anywhere; }
+  #error button {
+    font: 13px "Segoe UI", system-ui, sans-serif; color: var(--error-fg);
+    background: transparent; border: 1px solid var(--error-fg); border-radius: 6px;
+    padding: 3px 10px; cursor: pointer;
+  }
 
   /* ---- main panes ---- */
   /* 50/50 split: both panes are flex-basis-0 equal-grow siblings, so they

@@ -123,8 +123,9 @@ turned into HTML+CSS instead of being hand-laid-out by the GUI toolkit.
 
 ## Development
 
-Requirements: rustup stable; `mingw-w64` for Windows cross-builds
-(`sudo apt install mingw-w64` on Ubuntu/WSL).
+Requirements: rustup stable. Non-Windows hosts run the unit tests only;
+building the GUI (and release zips) needs a Windows machine or CI with the
+MSVC toolchain (`x86_64-pc-windows-msvc`).
 
 ```bash
 cargo test                                         # unit tests (headless)
@@ -154,10 +155,12 @@ Pushing a version tag runs [Release](.github/workflows/release.yml):
 git tag v0.X.Y && git push origin main --tags
 ```
 
-It cross-builds `pound.exe` with mingw-w64, packages the release zip
-(with `QUICK-START.txt` + `LICENSE`) and publishes a GitHub Release with
-notes generated from the commits since the previous tag — which is exactly
-what the install one-liner downloads.
+It builds `pound.exe` on a `windows-latest` MSVC runner (statically
+linked CRT and WebView2Loader — an import-table check refuses to ship any
+exe depending on non-system DLLs), packages the release zip (with
+`QUICK-START.txt` + `LICENSE`) and publishes a GitHub Release with notes
+generated from the commits since the previous tag — which is exactly what
+the install one-liner downloads.
 
 ## Roadmap
 

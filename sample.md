@@ -39,8 +39,8 @@ fn main() {
 
 | Feature   | State | Notes                     |
 |-----------|:-----:|---------------------------|
-| Render    |  ✅   | pulldown-cmark + egui     |
-| Source    |  ✅   | side-by-side, resizable   |
+| Render    |  ✅   | pulldown-cmark + WebView2  |
+| Source    |  ✅   | side-by-side, exact 50/50  |
 | Highlight |  ⏳   | roadmap                   |
 
 ---

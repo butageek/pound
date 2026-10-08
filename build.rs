@@ -1,7 +1,7 @@
 //! Embed the app icon and version resource into the Windows executable.
 //!
-//! Works for native MSVC builds (rc.exe from the VS Build Tools) and for
-//! Linux cross-builds (windres from mingw-w64 — this is what CI uses).
+//! Works for native MSVC builds (rc.exe from the VS Build Tools — what CI
+//! uses) and for Linux cross-checks (windres from mingw-w64, best effort).
 //! When no resource compiler can be found (e.g. a bare
 //! `cargo check --target x86_64-pc-windows-msvc` on a Linux dev box) it
 //! prints a warning and skips, so plain type-checking still works.

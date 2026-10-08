@@ -43,8 +43,6 @@ impl Document {
 #[derive(Default)]
 pub struct Model {
     pub document: Option<Document>,
-    /// Show the side-by-side source panel.
-    pub show_source: bool,
     /// Last user-facing error, shown as a banner.
     pub error: Option<String>,
     /// Bumped every time the document is (re)loaded; lets the view
@@ -69,14 +67,6 @@ impl Model {
             let path = doc.path.clone();
             self.open(&path);
         }
-    }
-
-    pub fn set_show_source(&mut self, show: bool) {
-        self.show_source = show;
-    }
-
-    pub fn toggle_source(&mut self) {
-        self.show_source = !self.show_source;
     }
 
     pub fn dismiss_error(&mut self) {
@@ -139,16 +129,6 @@ mod tests {
         model.open(Path::new("/definitely/not/here.md"));
         assert!(model.document.is_none());
         assert!(model.error.is_some());
-    }
-
-    #[test]
-    fn toggle_source_flips() {
-        let mut model = Model::default();
-        assert!(!model.show_source);
-        model.toggle_source();
-        assert!(model.show_source);
-        model.set_show_source(false);
-        assert!(!model.show_source);
     }
 
     #[test]
