@@ -75,6 +75,12 @@ Windows cross-check).
   binaries and leaves `$LASTEXITCODE` unset. Launch pound from scripts with
   `Start-Process -Wait -PassThru` (see tools/install.ps1 for the pattern,
   including output capture for diagnostics).
+- GOTCHA: profiles with dots in the username can get 8.3 short-form env
+  dirs (`C:\Users\HENDRY~1.CHO\...` in TEMP/LOCALAPPDATA), which trip
+  Remove-Item in Windows PowerShell 5.1 with a *terminating* error that
+  `-ErrorAction SilentlyContinue` cannot suppress. Canonicalize via
+  `Resolve-Path`/`GetFolderPath`, use `-LiteralPath`, and guard cleanup
+  with try/catch.
 
 ## Debugging
 

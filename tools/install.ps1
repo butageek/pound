@@ -51,6 +51,19 @@ $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = `
     [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
+# Canonicalize TEMP to its long form: profiles with dots in the username
+# (C:\Users\hendry.chou) can get an 8.3 short-form TEMP
+# (C:\Users\HENDRY~1.CHO\AppData\Local\Temp), which trips Remove-Item's
+# path handling in Windows PowerShell 5.1.
+$TempRoot = (Resolve-Path $env:TEMP).Path
+
+# Same for the default install dir: LOCALAPPDATA can be short-formed too,
+# and we don't want 8.3 paths baked into the registry or shortcuts.
+if ($InstallDir -eq (Join-Path $env:LOCALAPPDATA 'Pound')) {
+    $longLocal = [Environment]::GetFolderPath('LocalApplicationData')
+    if ($longLocal) { $InstallDir = Join-Path $longLocal 'Pound' }
+}
+
 function Write-Step([string]$msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 
 function Get-GithubLatestAsset {
@@ -70,7 +83,7 @@ function Get-GithubLatestAsset {
 
 function Expand-PoundArchive {
     param([string]$ArchivePath)
-    $tmp = Join-Path $env:TEMP ("pound-install-" + [guid]::NewGuid().ToString('N'))
+    $tmp = Join-Path $TempRoot ("pound-install-" + [guid]::NewGuid().ToString('N'))
     Expand-Archive -Path $ArchivePath -DestinationPath $tmp -Force
     $exe = (Get-ChildItem -Path $tmp -Recurse -Filter 'pound.exe' | Select-Object -First 1).FullName
     if (-not $exe) { throw 'pound.exe not found inside the downloaded archive.' }
@@ -80,7 +93,7 @@ function Expand-PoundArchive {
 # ---------------------------------------------------------------- binary ---
 if ($DownloadUrl -ne '') {
     Write-Step "Downloading $DownloadUrl"
-    $archive = Join-Path $env:TEMP ("pound-download-" + [guid]::NewGuid().ToString('N'))
+    $archive = Join-Path $TempRoot ("pound-download-" + [guid]::NewGuid().ToString('N'))
     Invoke-WebRequest -Uri $DownloadUrl -OutFile $archive -UseBasicParsing
     if ($DownloadUrl -like '*.zip') {
         $BinaryPath = Expand-PoundArchive $archive
@@ -104,7 +117,7 @@ if ($BinaryPath -eq '') {
     # No local build: fetch the latest release zip from GitHub.
     $releaseUrl = Get-GithubLatestAsset $Repo
     Write-Step "Downloading $releaseUrl"
-    $archive = Join-Path $env:TEMP ("pound-release-" + [guid]::NewGuid().ToString('N') + '.zip')
+    $archive = Join-Path $TempRoot ("pound-release-" + [guid]::NewGuid().ToString('N') + '.zip')
     Invoke-WebRequest -Uri $releaseUrl -OutFile $archive -UseBasicParsing
     $BinaryPath = Expand-PoundArchive $archive
 }
@@ -152,20 +165,22 @@ if (-not $NoRegister) {
     # executables and leaves $LASTEXITCODE unset, so launch it through
     # Start-Process, wait for the real exit code, and capture its output
     # for diagnostics.
-    $outLog = Join-Path $env:TEMP ("pound-register-out-" + [guid]::NewGuid().ToString('N') + '.txt')
-    $errLog = Join-Path $env:TEMP ("pound-register-err-" + [guid]::NewGuid().ToString('N') + '.txt')
+    $outLog = Join-Path $TempRoot ("pound-register-out-" + [guid]::NewGuid().ToString('N') + '.txt')
+    $errLog = Join-Path $TempRoot ("pound-register-err-" + [guid]::NewGuid().ToString('N') + '.txt')
     $registerArgs = @('register')
     if ($SetDefault) { $registerArgs += '--default' }
     $proc = Start-Process -FilePath $targetExe -ArgumentList $registerArgs `
         -Wait -PassThru -RedirectStandardOutput $outLog -RedirectStandardError $errLog
     if ($proc.ExitCode -ne 0) {
         $detail = ''
-        if (Test-Path $errLog) { $detail += (Get-Content $errLog -Raw) }
-        if (Test-Path $outLog) { $detail += (Get-Content $outLog -Raw) }
+        if (Test-Path -LiteralPath $errLog) { $detail += (Get-Content -LiteralPath $errLog -Raw -ErrorAction SilentlyContinue) }
+        if (Test-Path -LiteralPath $outLog) { $detail += (Get-Content -LiteralPath $outLog -Raw -ErrorAction SilentlyContinue) }
         if ($detail) { $detail = "`npound said:`n$detail" }
         throw "pound register failed with exit code $($proc.ExitCode).$detail"
     }
-    Remove-Item $outLog, $errLog -ErrorAction SilentlyContinue
+    # Cleanup is cosmetic: -ErrorAction alone cannot suppress terminating
+    # PSArgumentExceptions in PS 5.1, so guard with try/catch too.
+    try { Remove-Item -LiteralPath $outLog, $errLog -ErrorAction SilentlyContinue } catch { }
 }
 
 Write-Host ''
