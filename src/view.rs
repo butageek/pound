@@ -247,7 +247,7 @@ fn window_icon() -> Option<tao::window::Icon> {
 
 // ---------------------------------------------------------------------------
 // The shell document: top bar, rendered pane, source pane. The markdown
-// styles use a GitHub-derived palette with a Segoe UI / Consolas stack for
+// styles use a GitHub-style palette with a Segoe UI / Consolas stack for
 // native Windows typography.
 // ---------------------------------------------------------------------------
 
@@ -355,7 +355,7 @@ const SHELL_HTML: &str = r#"<!doctype html>
     font-family: Consolas, monospace; font-size: 12.5px;
   }
 
-  /* ---- markdown content (GitHub-style token set) ---- */
+  /* ---- markdown content (GitHub-style palette) ---- */
   #content {
     /* Full pane width like VSCode's preview (no centered reading column). */
     padding: 26px 40px 120px;
