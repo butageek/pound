@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use egui::{
     text::{LayoutJob, TextFormat},
-    CentralPanel, Color32, ColorImage, Frame, Grid, Image, Label, Layout, Margin, RichText,
-    ScrollArea, SidePanel, Stroke, TextureHandle, TextureOptions, TopBottomPanel, Ui,
+    CentralPanel, Color32, ColorImage, Frame, Image, Label, Layout, Margin, RichText, ScrollArea,
+    SidePanel, Stroke, TextureHandle, TextureOptions, TopBottomPanel, Ui,
 };
 
 use crate::markdown::{Block, Inline, Style};
@@ -28,6 +28,12 @@ const HEADING_SIZES: [f32; 6] = [28.0, 22.0, 19.0, 17.0, 15.0, 14.0];
 /// Custom font family holding the bold weight. egui's bundled fonts only
 /// include Ubuntu-Light, so bold runs select this family instead.
 const BOLD_FAMILY: &str = "pound-bold";
+
+/// Table cell padding and column sizing (points).
+const CELL_PAD_X: f32 = 10.0;
+const CELL_PAD_Y: f32 = 5.0;
+const MIN_COL_WIDTH: f32 = 40.0;
+
 /// Base text style for a group of runs (heading size, quote dimming…).
 #[derive(Clone, Copy)]
 struct TextBase {
@@ -47,7 +53,6 @@ struct RenderCtx<'a> {
     doc_dir: &'a Path,
     images: &'a mut HashMap<String, TextureHandle>,
     clicked_links: Vec<String>,
-    table_counter: u32,
     list_counter: u32,
 }
 
@@ -236,7 +241,6 @@ impl eframe::App for AppView {
                                     doc_dir: &dir,
                                     images,
                                     clicked_links: Vec::new(),
-                                    table_counter: 0,
                                     list_counter: 0,
                                 };
                                 render_blocks(ui, doc, &doc.blocks, BODY, &mut rc);
@@ -467,32 +471,105 @@ fn render_table(
     if columns == 0 {
         return;
     }
-    let id = format!("table-{}", rc.table_counter);
-    rc.table_counter += 1;
+
+    // NOTE: we deliberately do not use egui::Grid here — Grid measures cells
+    // with a tiny available width, which makes pre-wrapped galleys collapse
+    // to one-character-per-line and produces gigantic broken rows.
+
+    // Measure every cell's natural (single-line) width, including the header.
+    let mut widths = vec![0.0f32; columns];
+    let mut all_rows: Vec<&[Vec<Inline>]> = Vec::new();
+    if !head.is_empty() {
+        all_rows.push(head);
+    }
+    for row in rows {
+        all_rows.push(row);
+    }
+    for row in &all_rows {
+        for (c, cell) in row.iter().enumerate() {
+            let natural = measure_inlines_width(ui, cell, base);
+            widths[c] = widths[c].max(natural);
+        }
+    }
+    for w in widths.iter_mut() {
+        *w = (*w + 2.0 * CELL_PAD_X).max(MIN_COL_WIDTH);
+    }
+
+    // Fit the columns into the available width, like HTML's width:100%:
+    // shrink proportionally when too wide, grow proportionally when narrow.
+    let available = ui.available_width();
+    let total: f32 = widths.iter().sum();
+    if total > available {
+        let excess = total - available;
+        let shrinkable: f32 = widths.iter().map(|w| (w - MIN_COL_WIDTH).max(0.0)).sum();
+        if shrinkable > excess {
+            for w in widths.iter_mut() {
+                *w -= (*w - MIN_COL_WIDTH).max(0.0) / shrinkable * excess;
+            }
+        } else {
+            for w in widths.iter_mut() {
+                *w *= available / total;
+            }
+        }
+    } else if total < available {
+        for w in widths.iter_mut() {
+            *w *= available / total;
+        }
+    }
+
     let head_base = TextBase {
         strong: true,
         ..base
     };
-    Grid::new(id)
-        .num_columns(columns)
-        .striped(true)
-        .spacing([16.0, 6.0])
-        .min_col_width(48.0)
-        .show(ui, |ui| {
-            if !head.is_empty() {
-                for cell in head {
-                    ui.horizontal_wrapped(|ui| render_inlines(ui, cell, head_base, rc));
+
+    for (ri, row) in all_rows.iter().enumerate() {
+        let row_base = if ri == 0 && !head.is_empty() {
+            head_base
+        } else {
+            base
+        };
+        ui.with_layout(
+            Layout::left_to_right(egui::Align::Min).with_cross_align(egui::Align::Min),
+            |ui| {
+                for (c, cell) in row.iter().enumerate() {
+                    let width = widths.get(c).copied().unwrap_or(MIN_COL_WIDTH);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(width, 0.0),
+                        Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_min_width(width);
+                            ui.set_max_width(width);
+                            ui.add_space(CELL_PAD_Y);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.add_space(CELL_PAD_X);
+                                render_inlines(ui, cell, row_base, rc);
+                                ui.add_space(CELL_PAD_X);
+                            });
+                            ui.add_space(CELL_PAD_Y);
+                        },
+                    );
                 }
-                ui.end_row();
-            }
-            for row in rows {
-                for cell in row {
-                    ui.horizontal_wrapped(|ui| render_inlines(ui, cell, base, rc));
-                }
-                ui.end_row();
-            }
-        });
+            },
+        );
+        ui.separator();
+    }
     ui.add_space(8.0);
+}
+
+/// Natural single-line width of a run sequence, for table column sizing.
+fn measure_inlines_width(ui: &Ui, inlines: &[Inline], base: TextBase) -> f32 {
+    let mut job = LayoutJob::default(); // no wrap: measure at natural width
+    for inline in inlines {
+        if let Inline::Run { text, style } = inline {
+            job.append(text.as_str(), 0.0, text_format(ui, base, style));
+        }
+    }
+    if job.text.is_empty() {
+        0.0
+    } else {
+        let galley = ui.ctx().fonts(|fonts| fonts.layout_job(job));
+        galley.size().x
+    }
 }
 
 fn render_code(ui: &mut Ui, lang: Option<&str>, text: &str, dim: bool) {
@@ -615,7 +692,12 @@ fn text_format(ui: &Ui, base: TextBase, style: &Style) -> TextFormat {
     };
     let mut format = TextFormat {
         font_id: egui::FontId::new(size, family),
-        line_height: Some(line_height),
+        // Code chips use the monospace font's natural height: Segoe UI has a
+        // much taller ascent than Consolas, and forcing the shared row pitch
+        // on both anchors the chip's baseline noticeably HIGH. Natural height
+        // + centered valign puts code and body text on (almost) one baseline,
+        // and makes the background chip hug the text like VSCode's.
+        line_height: if style.code { None } else { Some(line_height) },
         color,
         background: if style.code {
             visuals.code_bg_color
@@ -623,6 +705,7 @@ fn text_format(ui: &Ui, base: TextBase, style: &Style) -> TextFormat {
             Color32::TRANSPARENT
         },
         italics: style.italic,
+        valign: egui::Align::Center,
         ..Default::default()
     };
     if style.strike {

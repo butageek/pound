@@ -44,6 +44,14 @@ source side by side (Ctrl+U). Architecture is strict MVP
   `line_height`, inline code backgrounds, underline/strike); links are
   hit-tested via `cursor_from_pos(...).index` — a CHARACTER offset, so link
   spans are tracked in chars, not bytes.
+- Code chips: monospace fonts have much shorter ascents than Segoe UI, so
+  code runs use the font's natural line height (no shared row pitch) plus
+  centered valign — otherwise the chip's baseline floats noticeably high.
+- Tables avoid `egui::Grid` on purpose: Grid measures cells with a tiny
+  available width, which collapses pre-wrapped galleys into
+  one-character-per-line and gigantic rows. `render_table` measures each
+  cell's natural single-line width, fits columns into the available width
+  (HTML width:100% style), and lays out rows manually.
 - `markdown.rs` maps common inline-HTML formatting tags onto style flags
   (`inline_html_tag`); unknown tags are ignored, `<br>` is a hard break.
 
