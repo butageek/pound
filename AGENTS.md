@@ -81,6 +81,10 @@ that way:
   ammonia via a generic attribute prefix (inert — scripts are stripped),
   and only direct children of `#content` count as sync anchors, so a
   file's raw HTML can't forge them.
+- Right-click: WebView2's default context menu (Chromium's Copy / Print /
+  empty "More tools" submenu) is disabled via
+  `with_default_context_menus(false)`; the shell shows a minimal Copy-only
+  menu when text is selected instead.
 - **ammonia sanitizes all HTML** — markdown files can embed raw HTML and
   file content must never execute (scripts/handlers/styling stripped).
   `poundimg`/`data` URL schemes must be in ammonia's allowlist or image

@@ -23,7 +23,7 @@ use tao::dpi::LogicalSize;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoop};
 use tao::window::WindowBuilder;
-use wry::{http, WebView, WebViewBuilder};
+use wry::{http, WebView, WebViewBuilder, WebViewBuilderExtWindows};
 
 use crate::model::Document;
 use crate::presenter::Presenter;
@@ -47,7 +47,11 @@ pub fn run(file: Option<PathBuf>) {
     let builder = WebViewBuilder::new()
         .with_html(SHELL_HTML)
         .with_devtools(cfg!(debug_assertions))
-        .with_custom_protocol("poundimg".into(), |_id, request| serve_local_image(request));
+        .with_custom_protocol("poundimg".into(), |_id, request| serve_local_image(request))
+        // Chromium's default right-click menu (Copy / Print / an empty
+        // "More tools" submenu) is browser noise here; the shell shows a
+        // minimal Copy-only menu instead.
+        .with_default_context_menus(false);
 
     let nav_presenter = shared.clone();
     let nav_dirty = dirty.clone();
@@ -320,10 +324,26 @@ const SHELL_HTML: &str = r#"<!doctype html>
     display: flex; align-items: center; gap: 6px; font-size: 13px;
     cursor: pointer; user-select: none;
   }
-  #topbar kbd {
+  #topbar kbd, #ctx-menu kbd {
     font: 11px Consolas, monospace; color: var(--muted);
     border: 1px solid var(--border); border-radius: 4px; padding: 0 4px;
   }
+
+  /* ---- context menu ---- */
+  /* The WebView2 default menu is disabled in the builder; this stands in
+     with the one action a reader needs: copy the selected text. */
+  #ctx-menu {
+    display: none; position: fixed; z-index: 20; padding: 4px; min-width: 160px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.18);
+  }
+  #ctx-menu.show { display: block; }
+  #ctx-copy {
+    display: flex; width: 100%; align-items: center; justify-content: space-between;
+    font: 13px "Segoe UI", system-ui, sans-serif; color: var(--text);
+    background: transparent; border: 0; border-radius: 5px; padding: 6px 10px; cursor: pointer;
+  }
+  #ctx-copy:hover { background: var(--hover); }
 
   /* ---- error banner ---- */
   #error {
@@ -468,6 +488,7 @@ const SHELL_HTML: &str = r#"<!doctype html>
     <span id="status-path"></span>
     <span id="status-info"></span>
   </div>
+  <div id="ctx-menu"><button id="ctx-copy" type="button">Copy <kbd>Ctrl+C</kbd></button></div>
 <script>
   window.pound = {
     setContent(html, source, title, path, status) {
@@ -603,6 +624,28 @@ const SHELL_HTML: &str = r#"<!doctype html>
   contentWrap.addEventListener('scroll', () => {
     if (Date.now() >= suppressEchoUntil.content) syncSourceFromContent();
   }, { passive: true });
+
+  // ---- context menu --------------------------------------------------
+  // Minimal replacement for the disabled WebView2 default menu: a lone
+  // Copy action, shown only when text is selected.
+  const ctxMenu = document.getElementById('ctx-menu');
+  const hideCtxMenu = () => ctxMenu.classList.remove('show');
+  document.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    if (!String(getSelection()).trim()) { hideCtxMenu(); return; }
+    ctxMenu.classList.add('show');
+    // Open at the cursor, nudged back inside the window if it would overflow.
+    ctxMenu.style.left = Math.min(e.clientX, innerWidth - ctxMenu.offsetWidth - 4) + 'px';
+    ctxMenu.style.top = Math.min(e.clientY, innerHeight - ctxMenu.offsetHeight - 4) + 'px';
+  });
+  document.getElementById('ctx-copy').onclick = () => {
+    copyText(String(getSelection()));
+    hideCtxMenu();
+  };
+  addEventListener('click', hideCtxMenu);
+  addEventListener('blur', hideCtxMenu);
+  addEventListener('scroll', hideCtxMenu, true); // scrolling any pane would leave the menu stale
+  addEventListener('keydown', e => { if (e.key === 'Escape') hideCtxMenu(); });
 
   // Tell the host this shell has parsed and pound.setContent is callable:
   // the initial content push races the page load, so the host re-sends on
