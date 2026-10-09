@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Generate the Pound logo & icon set (stdlib only, deterministic).
 
-Design: "the split-view hash". A rounded-square app tile carries a bold,
-rounded hash mark whose center cell is filled with the accent blue — the #
-that names the project, read as the reader's signature split view
-(source | rendered).
+Design: "the split hash". The # that names the project is cut down the
+middle by the pane divider: the bright left half is the rendered pane, the
+muted right half is the raw markdown source — the app's signature 50/50
+view in a single glyph. No other decoration.
 
 Outputs
   assets/pound.ico                  multi-size Windows icon (16..256)
@@ -28,19 +28,24 @@ BG_TOP = (58, 66, 88)      # #3A4258
 BG_BOTTOM = (34, 39, 54)   # #222736
 BG_INSET = 8
 BG_RADIUS = 56
-STROKE = (245, 248, 253)   # #F5F8FD
-ACCENT = (111, 168, 255)   # #6FA8FF
-MARK_DARK = (43, 48, 64)   # #2B3040 (mark-only variant for light backgrounds)
 
-# Hash geometry (256-scale). Two stems, two bars, rounded ends; the cell
-# between them carries the accent.
+# "The split hash": left of the center divider = rendered pane (bright);
+# right of it = raw markdown source (muted). Same geometry, two states.
+RENDERED = (245, 248, 253)  # #F5F8FD
+SOURCE = (126, 136, 160)    # #7E88A0
+CENTER = 128
+SPLIT_HALF_GAP = 7          # divider width = 2 * this
+
 STEM_W = 22
 BAR_H = 20
-STEM_C1, STEM_C2 = 96, 160     # stem centers (x)
+STEM_C1, STEM_C2 = 96, 160     # stem centers (x) — left / right of the split
 BAR_C1, BAR_C2 = 100, 156      # bar centers (y)
 MARK_TOP, MARK_BOTTOM = 62, 194
 MARK_LEFT, MARK_RIGHT = 62, 194
-CELL = (107, 110, 149, 146)    # x0, y0, x1, y1 — the center cell
+
+# mark-only variant colors (for light backgrounds)
+RENDERED_DARK = (43, 48, 64)     # #2B3040
+SOURCE_LIGHT = (150, 158, 176)   # #969EB0
 
 ICON_SIZES = [16, 24, 32, 48, 64, 256]
 LOGO_SIZES = [512, 256, 128, 64, 32]
@@ -65,8 +70,8 @@ def draw_rounded_rect(buf, x0, y0, x1, y1, radius, color):
                 row[x] = (*color, 255)
 
 
-def render(with_background, stroke_color):
-    """Render the design into an SS×SS premultiplied-ready RGBA buffer."""
+def render(with_background, rendered_color, source_color):
+    """Render the split hash into an SS×SS RGBA buffer."""
     s = SIZE * SS
     buf = [[(0, 0, 0, 0)] * s for _ in range(s)]
 
@@ -87,14 +92,24 @@ def render(with_background, stroke_color):
                 ):
                     row[x] = (r, g, b, 255)
 
-    # The accent "active pane", then the hash strokes over it.
-    cx0, cy0, cx1, cy1 = CELL
-    draw_rounded_rect(buf, cx0, cy0, cx1, cy1, 5, ACCENT)
+    gap_l = CENTER - SPLIT_HALF_GAP
+    gap_r = CENTER + SPLIT_HALF_GAP
 
-    for cx in (STEM_C1, STEM_C2):
-        draw_rounded_rect(buf, cx - STEM_W / 2, MARK_TOP, cx + STEM_W / 2, MARK_BOTTOM, STEM_W / 2, stroke_color)
-    for cy in (BAR_C1, BAR_C2):
-        draw_rounded_rect(buf, MARK_LEFT, cy - BAR_H / 2, MARK_RIGHT, cy + BAR_H / 2, BAR_H / 2, stroke_color)
+    # Rendered pane: left of the divider (bright).
+    draw_rounded_rect(buf, STEM_C1 - STEM_W / 2, MARK_TOP, STEM_C1 + STEM_W / 2, MARK_BOTTOM,
+                      STEM_W / 2, rendered_color)
+    draw_rounded_rect(buf, MARK_LEFT, BAR_C1 - BAR_H / 2, gap_l, BAR_C1 + BAR_H / 2,
+                      BAR_H / 2, rendered_color)
+    draw_rounded_rect(buf, MARK_LEFT, BAR_C2 - BAR_H / 2, gap_l, BAR_C2 + BAR_H / 2,
+                      BAR_H / 2, rendered_color)
+
+    # Source pane: right of the divider (muted).
+    draw_rounded_rect(buf, STEM_C2 - STEM_W / 2, MARK_TOP, STEM_C2 + STEM_W / 2, MARK_BOTTOM,
+                      STEM_W / 2, source_color)
+    draw_rounded_rect(buf, gap_r, BAR_C1 - BAR_H / 2, MARK_RIGHT, BAR_C1 + BAR_H / 2,
+                      BAR_H / 2, source_color)
+    draw_rounded_rect(buf, gap_r, BAR_C2 - BAR_H / 2, MARK_RIGHT, BAR_C2 + BAR_H / 2,
+                      BAR_H / 2, source_color)
 
     return buf
 
@@ -183,10 +198,10 @@ def ascii_preview(rgba, size):
             r, g, b, a = rgba[(y * size + x) * 4 : (y * size + x) * 4 + 4]
             if a < 128:
                 row += " "
-            elif b - r > 60:   # accent blue
-                row += "@"
-            elif r > 190:      # white strokes
+            elif r > 200:      # rendered pane (bright)
                 row += "#"
+            elif r > 100:      # source pane (muted)
+                row += "="
             else:              # tile background
                 row += "."
         print(row)
@@ -196,6 +211,8 @@ def ascii_preview(rgba, size):
 
 
 def icon_svg():
+    gap_l = CENTER - SPLIT_HALF_GAP
+    gap_r = CENTER + SPLIT_HALF_GAP
     return f"""<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Pound">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
@@ -204,26 +221,37 @@ def icon_svg():
     </linearGradient>
   </defs>
   <rect x="{BG_INSET}" y="{BG_INSET}" width="{SIZE - 2 * BG_INSET}" height="{SIZE - 2 * BG_INSET}" rx="{BG_RADIUS}" fill="url(#bg)"/>
-  <rect x="{CELL[0]}" y="{CELL[1]}" width="{CELL[2] - CELL[0]}" height="{CELL[3] - CELL[1]}" rx="5" fill="#6FA8FF"/>
+  <!-- rendered pane: left of the divider -->
   <g fill="#F5F8FD">
     <rect x="{STEM_C1 - STEM_W // 2}" y="{MARK_TOP}" width="{STEM_W}" height="{MARK_BOTTOM - MARK_TOP}" rx="{STEM_W // 2}"/>
+    <rect x="{MARK_LEFT}" y="{BAR_C1 - BAR_H // 2}" width="{gap_l - MARK_LEFT}" height="{BAR_H}" rx="{BAR_H // 2}"/>
+    <rect x="{MARK_LEFT}" y="{BAR_C2 - BAR_H // 2}" width="{gap_l - MARK_LEFT}" height="{BAR_H}" rx="{BAR_H // 2}"/>
+  </g>
+  <!-- source pane: right of the divider -->
+  <g fill="#7E88A0">
     <rect x="{STEM_C2 - STEM_W // 2}" y="{MARK_TOP}" width="{STEM_W}" height="{MARK_BOTTOM - MARK_TOP}" rx="{STEM_W // 2}"/>
-    <rect x="{MARK_LEFT}" y="{BAR_C1 - BAR_H // 2}" width="{MARK_RIGHT - MARK_LEFT}" height="{BAR_H}" rx="{BAR_H // 2}"/>
-    <rect x="{MARK_LEFT}" y="{BAR_C2 - BAR_H // 2}" width="{MARK_RIGHT - MARK_LEFT}" height="{BAR_H}" rx="{BAR_H // 2}"/>
+    <rect x="{gap_r}" y="{BAR_C1 - BAR_H // 2}" width="{MARK_RIGHT - gap_r}" height="{BAR_H}" rx="{BAR_H // 2}"/>
+    <rect x="{gap_r}" y="{BAR_C2 - BAR_H // 2}" width="{MARK_RIGHT - gap_r}" height="{BAR_H}" rx="{BAR_H // 2}"/>
   </g>
 </svg>
 """
 
 
 def mark_svg():
+    gap_l = CENTER - SPLIT_HALF_GAP
+    gap_r = CENTER + SPLIT_HALF_GAP
     return f"""<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Pound mark">
-  <!-- strokes use currentColor: set CSS `color` to fit the host design -->
-  <rect x="{CELL[0]}" y="{CELL[1]}" width="{CELL[2] - CELL[0]}" height="{CELL[3] - CELL[1]}" rx="5" fill="#6FA8FF"/>
+  <!-- strokes use currentColor: set CSS `color` to fit the host design;
+       the source half is the same color at reduced opacity -->
   <g fill="currentColor">
     <rect x="{STEM_C1 - STEM_W // 2}" y="{MARK_TOP}" width="{STEM_W}" height="{MARK_BOTTOM - MARK_TOP}" rx="{STEM_W // 2}"/>
+    <rect x="{MARK_LEFT}" y="{BAR_C1 - BAR_H // 2}" width="{gap_l - MARK_LEFT}" height="{BAR_H}" rx="{BAR_H // 2}"/>
+    <rect x="{MARK_LEFT}" y="{BAR_C2 - BAR_H // 2}" width="{gap_l - MARK_LEFT}" height="{BAR_H}" rx="{BAR_H // 2}"/>
+  </g>
+  <g fill="currentColor" opacity="0.45">
     <rect x="{STEM_C2 - STEM_W // 2}" y="{MARK_TOP}" width="{STEM_W}" height="{MARK_BOTTOM - MARK_TOP}" rx="{STEM_W // 2}"/>
-    <rect x="{MARK_LEFT}" y="{BAR_C1 - BAR_H // 2}" width="{MARK_RIGHT - MARK_LEFT}" height="{BAR_H}" rx="{BAR_H // 2}"/>
-    <rect x="{MARK_LEFT}" y="{BAR_C2 - BAR_H // 2}" width="{MARK_RIGHT - MARK_LEFT}" height="{BAR_H}" rx="{BAR_H // 2}"/>
+    <rect x="{gap_r}" y="{BAR_C1 - BAR_H // 2}" width="{MARK_RIGHT - gap_r}" height="{BAR_H}" rx="{BAR_H // 2}"/>
+    <rect x="{gap_r}" y="{BAR_C2 - BAR_H // 2}" width="{MARK_RIGHT - gap_r}" height="{BAR_H}" rx="{BAR_H // 2}"/>
   </g>
 </svg>
 """
@@ -237,8 +265,10 @@ def main():
     logo = root / "logo"
     logo.mkdir(parents=True, exist_ok=True)
 
-    icon_master = render(with_background=True, stroke_color=STROKE)
-    mark_master = render(with_background=False, stroke_color=MARK_DARK)
+    icon_master = render(with_background=True,
+                         rendered_color=RENDERED, source_color=SOURCE)
+    mark_master = render(with_background=False,
+                         rendered_color=RENDERED_DARK, source_color=SOURCE_LIGHT)
 
     icon_256 = resize(icon_master, SIZE)
     (root / "pound.png").write_bytes(encode_png(icon_256, SIZE))

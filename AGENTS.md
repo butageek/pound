@@ -36,7 +36,8 @@ source side by side (Ctrl+U). Architecture is strict MVP
 - The logo & icon set — `assets/pound.ico` (16–256), `assets/pound.png`,
   and the SVG/PNG assets under `assets/logo/` — is regenerated with
   `python3 tools/gen_icon.py` (stdlib only; supersampled anti-aliasing).
-  Design: "the split-view hash" — accent center cell = the active pane.
+  Design: "the split hash" — the glyph is split down the middle: the
+  bright half is the rendered pane, the muted half is the raw source.
   It prints an ASCII preview so geometry can be checked from a terminal.
 
 ## Rendering notes
