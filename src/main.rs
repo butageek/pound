@@ -22,6 +22,8 @@ mod presenter;
 #[cfg(windows)]
 mod register;
 #[cfg(any(windows, test))]
+mod theme;
+#[cfg(any(windows, test))]
 mod update;
 #[cfg(windows)]
 mod view;

@@ -27,7 +27,19 @@ use tao::window::WindowBuilder;
 use wry::{http, WebView, WebViewBuilder, WebViewBuilderExtWindows};
 
 use crate::presenter::Presenter;
+use crate::register;
+use crate::theme::Theme;
 use crate::update;
+
+/// The shell with the persisted theme injected (`window.poundTheme`):
+/// the head script resolves it before first paint, so the app never
+/// flashes the wrong theme.
+fn shell_html(theme: &Theme) -> String {
+    SHELL_HTML.replace(
+        "window.poundTheme = 'auto'",
+        &format!("window.poundTheme = '{}'", theme.as_str()),
+    )
+}
 
 /// How often to check the document for on-disk changes.
 const POLL_INTERVAL: Duration = Duration::from_millis(800);
@@ -71,7 +83,7 @@ pub fn run(file: Option<PathBuf>) {
     }
 
     let builder = WebViewBuilder::new()
-        .with_html(SHELL_HTML)
+        .with_html(shell_html(&register::load_theme()))
         .with_devtools(cfg!(debug_assertions))
         .with_custom_protocol("poundimg".into(), |_id, request| serve_local_image(request))
         // Chromium's default right-click menu (Copy / Print / an empty
@@ -93,6 +105,8 @@ pub fn run(file: Option<PathBuf>) {
     //   "exit"           the close prompt's Don't save: exit now
     //   "update"         the update toast's Update & restart
     //   "cancel-exit"    the close prompt's Cancel (clears pending update)
+    //   "theme\n<v>"      theme changed (auto/light/dark): persist only,
+    //                     the shell already applied it locally
     //   "edit\n<text>"   the (debounced) editor buffer changed
     let ipc_presenter = shared.clone();
     let ipc_dirty = dirty.clone();
@@ -139,6 +153,10 @@ pub fn run(file: Option<PathBuf>) {
             }
         } else if body == "cancel-exit" {
             ipc_update_on_exit.set(false);
+        } else if let Some(value) = body.strip_prefix("theme\n") {
+            if let Some(theme) = Theme::parse(value) {
+                register::save_theme(&theme);
+            }
         } else if let Some(text) = body.strip_prefix("edit\n") {
             ipc_presenter.borrow_mut().edit_source(text);
             ipc_preview.set(true);
@@ -441,19 +459,23 @@ const SHELL_HTML: &str = r#"<!doctype html>
 <head>
 <meta charset="utf-8">
 <style>
+  /* The theme is resolved by the head script (the persisted choice is
+     injected as window.poundTheme; Auto follows the system) and applied
+     as <html data-theme="light|dark">. color-scheme themes scrollbars and
+     form controls to match. */
   :root {
+    color-scheme: light;
     --bg: #ffffff; --text: #24292f; --muted: #656d76; --border: #d0d7de;
     --link: #0969da; --code-bg: rgba(175,184,193,0.2); --code-block-bg: #f6f8fa;
     --th-bg: #f6f8fa; --hover: rgba(175,184,193,0.25);
     --error-fg: #cf222e; --error-bg: rgba(207,34,46,0.08);
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0d1117; --text: #e6edf3; --muted: #8b949e; --border: #30363d;
-      --link: #58a6ff; --code-bg: rgba(110,118,129,0.4); --code-block-bg: #161b22;
-      --th-bg: #161b22; --hover: rgba(110,118,129,0.25);
-      --error-fg: #f85149; --error-bg: rgba(248,81,73,0.1);
-    }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0d1117; --text: #e6edf3; --muted: #8b949e; --border: #30363d;
+    --link: #58a6ff; --code-bg: rgba(110,118,129,0.4); --code-block-bg: #161b22;
+    --th-bg: #161b22; --hover: rgba(110,118,129,0.25);
+    --error-fg: #f85149; --error-bg: rgba(248,81,73,0.1);
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -478,6 +500,11 @@ const SHELL_HTML: &str = r#"<!doctype html>
   #topbar button:hover:not(:disabled) { background: var(--hover); }
   #topbar button:disabled { color: var(--muted); cursor: default; opacity: 0.6; }
   #topbar .spacer { flex: 1; }
+  #topbar select {
+    font: 13px "Segoe UI", system-ui, sans-serif; color: var(--text);
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 3px 6px; cursor: pointer;
+  }
   #topbar label.toggle {
     display: flex; align-items: center; gap: 6px; font-size: 13px;
     cursor: pointer; user-select: none;
@@ -665,11 +692,29 @@ const SHELL_HTML: &str = r#"<!doctype html>
   }
   #content del { color: var(--muted); }
 </style>
+<script>
+  // Resolve the theme before first paint so the app never flashes the
+  // wrong one: the host injects the persisted choice as window.poundTheme
+  // (see shell_html in view.rs); Auto follows the system.
+  window.poundTheme = 'auto';
+  (function () {
+    var pref = window.poundTheme;
+    if (pref === 'auto') {
+      pref = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    document.documentElement.dataset.theme = pref;
+  })();
+</script>
 </head>
 <body>
   <div id="topbar">
     <span class="brand">Pound</span>
     <span class="spacer"></span>
+    <select id="theme" title="Theme">
+      <option value="auto">Auto</option>
+      <option value="light">Light</option>
+      <option value="dark">Dark</option>
+    </select>
     <button id="save" type="button" disabled>Save <kbd>Ctrl+S</kbd></button>
     <label class="toggle">
       <input type="checkbox" id="source-toggle"> Source <kbd>Ctrl+U</kbd>
@@ -772,6 +817,12 @@ const SHELL_HTML: &str = r#"<!doctype html>
       document.getElementById('update-notes').href =
         'https://github.com/butageek/pound/releases/tag/' + encodeURIComponent(version);
       document.getElementById('update').style.display = 'flex';
+    },
+    // Apply a theme preference (auto/light/dark). The select applies it
+    // locally on change; the host only persists the choice.
+    setTheme(pref) {
+      document.getElementById('theme').value = pref;
+      applyTheme(pref);
     },
   };
 
@@ -914,6 +965,27 @@ const SHELL_HTML: &str = r#"<!doctype html>
       e.preventDefault();
       document.execCommand('insertText', false, '    ');
     }
+  });
+
+  // ---- theme ----------------------------------------------------------
+  // Auto resolves through matchMedia (and follows live system changes);
+  // Light/Dark are forced via <html data-theme>. The choice persists on
+  // the host side (HKCU), never re-reads it here.
+  function applyTheme(pref) {
+    let resolved = pref;
+    if (pref === 'auto') {
+      resolved = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    document.documentElement.dataset.theme = resolved;
+  }
+  const themeSelect = document.getElementById('theme');
+  themeSelect.value = window.poundTheme;
+  themeSelect.onchange = () => {
+    applyTheme(themeSelect.value);
+    hostSend('theme\n' + themeSelect.value);
+  };
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    if (themeSelect.value === 'auto') applyTheme('auto');
   });
 
   // ---- context menu --------------------------------------------------

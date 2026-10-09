@@ -95,6 +95,15 @@ file types (CSV next). Architecture is strict MVP
   shows `edited`, plus `changed on disk` when the file was modified
   externally (saving resolves it, last writer wins); a same-content mtime
   touch never reloads. The window title prefixes `*` while unsaved.
+- Themes: a top-bar selector offers Auto / Light / Dark. The persisted
+  choice (`HKCU\Software\Pound\Theme`, `theme.rs` + `register.rs`)
+  is injected into the shell as `window.poundTheme` before first paint
+  (`shell_html`), so the app never flashes the wrong theme. The head
+  script resolves Auto via `matchMedia` and the page uses
+  `<html data-theme>` + `color-scheme` (also themes scrollbars/controls);
+  a `matchMedia` listener follows live system changes while on Auto.
+  Select changes apply locally and post `theme\n<value>` — the host only
+  persists (no push round-trip).
 - Closing with unsaved changes: `CloseRequested` shows the shell's
   dialog via `pound.setClosePrompt(true)` instead of exiting. Its buttons
   post `save-and-exit` (the host saves first and only exits when the

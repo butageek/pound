@@ -19,6 +19,7 @@
 //!     FileAssociations\.md = Pound.md
 //! ```
 
+use crate::theme::Theme;
 use std::io;
 use std::path::PathBuf;
 
@@ -74,6 +75,28 @@ fn notify_assoc_changed() {
 /// already a console, pipe, or redirected file (installers capture output
 /// via `Start-Process -RedirectStandardOutput`), we leave it alone so the
 /// redirection keeps working.
+/// The user's theme choice (`HKCU\Software\Pound\Theme`); Auto when the
+/// value is missing or garbage (e.g. written by a future version).
+pub fn load_theme() -> Theme {
+    let read = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey("Software\\Pound")
+        .and_then(|key| key.get_value::<String, _>("Theme"));
+    read.ok()
+        .and_then(|value| Theme::parse(&value))
+        .unwrap_or_default()
+}
+
+/// Persist the theme choice. Best-effort: a locked-down registry just
+/// means the choice lasts for this session.
+pub fn save_theme(theme: &Theme) {
+    let written = RegKey::predef(HKEY_CURRENT_USER)
+        .create_subkey("Software\\Pound")
+        .and_then(|(key, _)| key.set_value("Theme", &theme.as_str()));
+    if let Err(e) = written {
+        eprintln!("pound: could not save the theme choice: {e}");
+    }
+}
+
 pub fn attach_parent_console() {
     use windows_sys::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_UNKNOWN};
     use windows_sys::Win32::System::Console::{
