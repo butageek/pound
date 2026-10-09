@@ -134,6 +134,11 @@ Windows cross-check).
 ## Debugging
 
 - `pound --help` / `pound --version` print to the console (AttachConsole).
+- Windows-only test trap: `Path::canonicalize` returns `\\?\`-prefixed
+  verbatim paths on Windows but plain paths on Linux, so comparisons
+  against raw `canonicalize()` output pass locally and fail on Windows
+  CI. Compare with `model::strip_verbatim_prefix(...)` instead (this cost
+  the first v0.2.0 tag its release run).
 - The GUI runs on Windows only; on Linux, non-Windows hosts print a notice.
   Verify the shell/rendering in any browser via the `dump_rendered_sample`
   recipe in Rendering notes.

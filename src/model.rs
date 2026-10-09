@@ -61,7 +61,7 @@ impl Document {
 /// prefix so every display site shows ordinary paths (`C:\…`,
 /// `\\server\share`); the plain form is accepted by every filesystem API
 /// just as well. No-op on other platforms.
-fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+pub(crate) fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
     let text = path.as_os_str().to_string_lossy();
     if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
         return PathBuf::from(format!(r"\\{rest}"));

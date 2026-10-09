@@ -80,9 +80,12 @@ mod tests {
             model: Model::default(),
         };
         presenter.open_dropped(&[PathBuf::from("/tmp/a.txt"), md.clone()]);
+        // On Windows `canonicalize` returns `\\?\`-prefixed verbatim paths,
+        // which `Document::load` strips — compare against the stripped form
+        // (raw output matches on Linux, so this only fails on Windows CI).
         assert_eq!(
             presenter.model.document.as_ref().unwrap().path,
-            md.canonicalize().unwrap()
+            crate::model::strip_verbatim_prefix(md.canonicalize().unwrap())
         );
     }
 
