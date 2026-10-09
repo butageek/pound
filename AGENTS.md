@@ -60,6 +60,15 @@ that way:
   intents. There is deliberately no Open/Reload UI: files arrive by
   double-click, drag-and-drop or CLI, and on-disk edits auto-reload.
   http(s)/mailto links are opened externally and never navigate the reader.
+- Startup handshake: `evaluate_script` right after `build` races
+  WebView2's `NavigateToString` commit — a warm-started second instance
+  regularly loses (the script runs in the still-blank document where
+  `pound` is undefined; wry ignores the exception), which showed up as
+  "opened a file into a new window, no content". The shell posts
+  `window.ipc.postMessage('ready')` when its scripts parsed and the view
+  re-pushes the document. `window.ipc` is injected only when
+  `with_ipc_handler` is registered, so it's a no-op in plain browsers and
+  the preview recipe below keeps working.
 - Local images: `markdown.rs` rewrites relative srcs to percent-encoded
   `poundimg://<abs path>`; the view serves them from disk via a custom
   protocol. Unknown/missing files keep their src (broken-image marker).

@@ -9,7 +9,9 @@
 //!   text, title and errors as JSON-escaped strings.
 //! - JS -> Rust: in-page controls navigate to `pound://…` URLs (the error
 //!   banner's dismiss), which the navigation handler intercepts and turns
-//!   into presenter intents.
+//!   into presenter intents. The shell additionally posts `ready` via
+//!   wry's `window.ipc` once its scripts parsed — the initial content push
+//!   races page load, so the view re-pushes on that handshake.
 //! - Local images are served through the `poundimg://` custom protocol.
 
 use std::cell::{Cell, RefCell};
@@ -49,6 +51,17 @@ pub fn run(file: Option<PathBuf>) {
 
     let nav_presenter = shared.clone();
     let nav_dirty = dirty.clone();
+    // Startup handshake: the eager `push_document` below races WebView2's
+    // `NavigateToString` commit — when it runs while the initial blank
+    // document is still current, `pound` is undefined and the push is lost
+    // (wry ignores script exceptions). The shell therefore posts `ready`
+    // once its scripts have parsed (see SHELL_HTML) and we re-push then.
+    let ipc_dirty = dirty.clone();
+    let builder = builder.with_ipc_handler(move |request| {
+        if request.body().as_str() == "ready" {
+            ipc_dirty.set(true);
+        }
+    });
     let webview = builder
         .with_navigation_handler(move |url| {
             handle_navigation(&url, &mut nav_presenter.borrow_mut(), &nav_dirty)
@@ -525,6 +538,12 @@ const SHELL_HTML: &str = r#"<!doctype html>
       applySplit();
     }
   });
+
+  // Tell the host this shell has parsed and pound.setContent is callable:
+  // the initial content push races the page load, so the host re-sends on
+  // 'ready' (window.ipc exists only inside the app — in a plain browser
+  // this is a no-op, keeping the preview recipe usable).
+  if (window.ipc) window.ipc.postMessage('ready');
 </script>
 </body>
 </html>
