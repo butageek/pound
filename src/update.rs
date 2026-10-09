@@ -7,6 +7,9 @@
 //! same battle-tested path a manual upgrade takes. Failures are silent:
 //! a check that cannot reach the network just never shows a notice.
 
+use std::path::Path;
+use std::sync::Mutex;
+
 /// Compare two versions ("v0.4.1" or "0.4.1"). Anything unparseable
 /// (garbage, prerelease suffixes) counts as "not newer" so it can never
 /// nag the user into a bogus update.
@@ -57,33 +60,80 @@ pub fn latest_release_tag() -> Option<String> {
     (output.status.success() && !tag.is_empty()).then_some(tag)
 }
 
-/// Run the official installer (downloads the latest release, closes this
-/// running Pound, replaces the exe, re-registers) and relaunch it after.
-/// The spawned PowerShell outlives this process; call right before exit.
+/// Build the PowerShell that runs the official installer. `open_path` is
+/// reopened by the relaunched Pound; embedded quotes are doubled per
+/// PowerShell escaping rules.
 #[cfg(windows)]
-pub fn run_installer() {
-    use std::os::windows::process::CommandExt;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    // Download-then-invoke so the script can take the -Relaunch parameter
+fn installer_script(open_path: Option<&Path>) -> String {
+    let open = open_path
+        .map(|path| {
+            let escaped = path.display().to_string().replace('"', "\"\"");
+            format!(" -OpenPath \"{escaped}\"")
+        })
+        .unwrap_or_default();
+    // Download-then-invoke so the script can take parameters
     // (`irm … | iex` cannot pass parameters).
-    let script = format!(
+    format!(
         "irm https://raw.githubusercontent.com/{REPO}/main/tools/install.ps1 \
          -OutFile \"$env:TEMP\\pound-update.ps1\"; \
-         & \"$env:TEMP\\pound-update.ps1\" -Relaunch"
-    );
-    let spawned = std::process::Command::new("powershell")
+         & \"$env:TEMP\\pound-update.ps1\" -Relaunch{open}"
+    )
+}
+
+/// Live state of a running installer, streamed to the shell's toast.
+#[derive(Default)]
+pub struct InstallerRun {
+    /// The installer's own progress lines (Write-Step output).
+    pub lines: Vec<String>,
+    pub finished: bool,
+    pub success: bool,
+}
+
+pub type InstallerSlot = Mutex<Option<InstallerRun>>;
+
+/// Spawn the official installer with piped output so the caller can show
+/// its progress (`run::read_installer_output` streams the lines). The
+/// installer closes this running Pound itself (graceful, then force)
+/// before replacing the exe, so the caller stays alive and shows progress
+/// until then. `open_path` is reopened by the relaunched Pound.
+#[cfg(windows)]
+pub fn spawn_installer(open_path: Option<&Path>) -> std::io::Result<std::process::Child> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new("powershell")
         .args([
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            &script,
+            &installer_script(open_path),
         ])
         .creation_flags(CREATE_NO_WINDOW)
-        .spawn();
-    if let Err(e) = spawned {
-        eprintln!("pound: could not start the updater: {e}");
+        .stdout(Stdio::piped())
+        .spawn()
+}
+
+/// Stream the installer's progress lines into `run` until it exits.
+#[cfg(windows)]
+pub fn read_installer_output(mut child: std::process::Child, run: &InstallerSlot) {
+    use std::io::BufRead;
+
+    if let Some(stdout) = child.stdout.take() {
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if let Some(state) = run.lock().unwrap().as_mut() {
+                state.lines.push(line);
+            }
+        }
+    }
+    let success = child.wait().map(|status| status.success()).unwrap_or(false);
+    if let Some(state) = run.lock().unwrap().as_mut() {
+        state.finished = true;
+        state.success = success;
     }
 }
 
@@ -106,5 +156,20 @@ mod tests {
         assert!(!is_newer("garbage", "0.4.0"));
         assert!(!is_newer("v0.5.0-beta", "0.4.0")); // prerelease: never nag
         assert!(!is_newer("", "0.4.0"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn installer_script_carries_the_open_path() {
+        let script = installer_script(Some(Path::new("C:\\dir with space\\a.md")));
+        assert!(script.contains("-Relaunch"));
+        assert!(script.contains("-OpenPath \"C:\\dir with space\\a.md\""));
+
+        assert!(installer_script(None).contains("-Relaunch"));
+        assert!(!installer_script(None).contains("-OpenPath"));
+
+        // Embedded quotes are doubled (PowerShell escaping).
+        let quoted = installer_script(Some(Path::new("we\"ird.md")));
+        assert!(quoted.contains("-OpenPath \"we\"\"ird.md\""));
     }
 }

@@ -68,6 +68,11 @@ pub fn run(file: Option<PathBuf>) {
     // Set by ipc when the shell must show the close prompt (the handler
     // cannot reach the webview directly).
     let show_close_prompt = Rc::new(Cell::new(false));
+    // Set by ipc when the toast must switch to progress mode (same reason).
+    let show_update_progress = Rc::new(Cell::new(false));
+    // The running installer's streamed progress (see update::InstallerRun).
+    // Shared with the ipc handler, which spawns it.
+    let installer: Arc<update::InstallerSlot> = Arc::new(Mutex::new(None));
 
     // Background update check on start: a thread asks the GitHub API and
     // drops the latest tag here (None = no result); the event loop picks
@@ -114,12 +119,29 @@ pub fn run(file: Option<PathBuf>) {
     let ipc_exit = exit.clone();
     let ipc_update_on_exit = update_on_exit.clone();
     let ipc_show_close_prompt = show_close_prompt.clone();
+    let ipc_update_ui = show_update_progress.clone();
+    let ipc_installer = Arc::clone(&installer);
     let builder = builder.with_ipc_handler(move |request| {
         let body = request.body();
-        // Runs the installer if an update is pending; consumed once.
-        let install_if_pending = || {
-            if ipc_update_on_exit.replace(false) {
-                update::run_installer();
+        // Spawn the installer and switch the toast to progress mode. The
+        // app stays alive showing progress until the installer's graceful
+        // close closes it at the replace step; a failed spawn returns
+        // false so the caller can fall back (plain exit / keep open).
+        let begin_update = |open_path: Option<&std::path::Path>| -> bool {
+            match update::spawn_installer(open_path) {
+                Ok(child) => {
+                    *ipc_installer.lock().unwrap() = Some(update::InstallerRun::default());
+                    let slot = Arc::clone(&ipc_installer);
+                    std::thread::spawn(move || update::read_installer_output(child, &slot));
+                    ipc_update_ui.set(true);
+                    true
+                }
+                Err(e) => {
+                    ipc_presenter.borrow_mut().model.error =
+                        Some(format!("could not start the updater: {e}"));
+                    ipc_preview.set(true);
+                    false
+                }
             }
         };
         if body == "ready" {
@@ -128,28 +150,49 @@ pub fn run(file: Option<PathBuf>) {
             ipc_presenter.borrow_mut().save();
             ipc_preview.set(true);
         } else if body == "save-and-exit" {
+            let open_path = ipc_presenter
+                .borrow()
+                .model
+                .document
+                .as_ref()
+                .map(|doc| doc.path.clone());
             let mut presenter = ipc_presenter.borrow_mut();
             presenter.save();
             let saved = !presenter.model.dirty;
             drop(presenter);
             if saved {
-                install_if_pending();
-                ipc_exit.set(true);
+                // Progress mode: the installer closes us at the replace
+                // step; a failed spawn falls back to a plain close.
+                if !begin_update(open_path.as_deref()) {
+                    ipc_exit.set(true);
+                }
             } else {
                 // The save failed (banner shows why): stay open.
                 ipc_preview.set(true);
             }
         } else if body == "exit" {
-            install_if_pending();
-            ipc_exit.set(true);
+            let open_path = ipc_presenter
+                .borrow()
+                .model
+                .document
+                .as_ref()
+                .map(|doc| doc.path.clone());
+            if !begin_update(open_path.as_deref()) {
+                ipc_exit.set(true);
+            }
         } else if body == "update" {
             if ipc_presenter.borrow().model.dirty {
                 // Reuse the close prompt: save or discard, then update.
                 ipc_update_on_exit.set(true);
                 ipc_show_close_prompt.set(true);
             } else {
-                update::run_installer();
-                ipc_exit.set(true);
+                let open_path = ipc_presenter
+                    .borrow()
+                    .model
+                    .document
+                    .as_ref()
+                    .map(|doc| doc.path.clone());
+                begin_update(open_path.as_deref());
             }
         } else if body == "cancel-exit" {
             ipc_update_on_exit.set(false);
@@ -176,6 +219,10 @@ pub fn run(file: Option<PathBuf>) {
     let mut last_pushed = shared.borrow().model.revision;
     let mut last_title = current_title(&shared.borrow());
     let mut last_poll = Instant::now();
+    // Update-progress UI state: the toast switched to progress mode, and
+    // how many installer lines have been mirrored into it so far.
+    let mut update_ui_active = false;
+    let mut update_lines_shown = 0usize;
 
     event_loop.run(move |event, _, control_flow| {
         // Wake up periodically for the file-change poll.
@@ -187,8 +234,11 @@ pub fn run(file: Option<PathBuf>) {
                 ..
             } => {
                 // Unsaved edits: ask before quitting (the shell's dialog
-                // posts save-and-exit/exit; cancel just closes it).
-                if shared.borrow().model.dirty {
+                // posts save-and-exit/exit; cancel just closes it). While
+                // an update is running the buffer is clean by definition —
+                // the installer will close us at the replace step.
+                let updating = installer.lock().unwrap().is_some();
+                if shared.borrow().model.dirty && !updating {
                     eval_script(&webview, "pound.setClosePrompt(true);".to_owned());
                 } else {
                     *control_flow = ControlFlow::Exit;
@@ -209,6 +259,32 @@ pub fn run(file: Option<PathBuf>) {
                 }
                 if show_close_prompt.replace(false) {
                     eval_script(&webview, "pound.setClosePrompt(true);".to_owned());
+                }
+                // Update progress: switch the toast to progress mode once,
+                // then mirror the installer's latest line until it exits.
+                if show_update_progress.replace(false) {
+                    update_ui_active = true;
+                    update_lines_shown = 0;
+                    eval_script(&webview, "pound.setUpdating();".to_owned());
+                }
+                if update_ui_active {
+                    let guard = installer.lock().unwrap();
+                    if let Some(run) = guard.as_ref() {
+                        if run.lines.len() > update_lines_shown {
+                            update_lines_shown = run.lines.len();
+                            let line = run.lines.last().cloned().unwrap_or_default();
+                            eval_script(
+                                &webview,
+                                format!("pound.setUpdatingProgress({});", json_str(&line)),
+                            );
+                        }
+                        if run.finished {
+                            // The installer completed but did not close us
+                            // (e.g. a portable exe elsewhere): exit so the
+                            // freshly installed/relaunched Pound takes over.
+                            *control_flow = ControlFlow::Exit;
+                        }
+                    }
                 }
                 // One-shot: show the update toast when a newer release was
                 // found by the background check.
@@ -563,14 +639,27 @@ const SHELL_HTML: &str = r#"<!doctype html>
   }
 
   /* ---- update toast ---- */
+  /* Single row, nothing wraps; setUpdating swaps the offer for progress. */
   #update {
     display: none; position: fixed; right: 12px; bottom: 38px; z-index: 25;
-    align-items: center; gap: 12px; max-width: 460px; padding: 10px 14px;
-    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
-    box-shadow: 0 6px 20px rgba(0,0,0,0.2); font-size: 13px;
+    padding: 10px 14px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.25); font-size: 13px; white-space: nowrap;
   }
+  #update-offer, #update-progress { display: flex; align-items: center; gap: 10px; }
+  #update-progress { display: none; }
   #update a { color: var(--link); text-decoration: none; }
   #update a:hover { text-decoration: underline; }
+  #update .spinner {
+    width: 14px; height: 14px; border: 2px solid var(--border);
+    border-top-color: var(--link); border-radius: 50%;
+    animation: pound-spin 0.8s linear infinite;
+  }
+  @keyframes pound-spin { to { transform: rotate(360deg); } }
+  #update-progress-line {
+    display: inline-block; max-width: 340px;
+    overflow: hidden; text-overflow: ellipsis; vertical-align: middle;
+  }
 
   /* ---- error banner ---- */
   #error {
@@ -739,10 +828,16 @@ const SHELL_HTML: &str = r#"<!doctype html>
   </div>
   <div id="ctx-menu"><button id="ctx-copy" type="button">Copy <kbd>Ctrl+C</kbd></button></div>
   <div id="update">
-    <span>Pound <b id="update-version"></b> is available.</span>
-    <a id="update-notes" href="">What's new</a>
-    <button id="update-now" class="primary" type="button">Update &amp; restart</button>
-    <button id="update-dismiss" type="button">Later</button>
+    <div id="update-offer">
+      <span>Pound <b id="update-version"></b> is available.</span>
+      <a id="update-notes" href="">What's new</a>
+      <button id="update-now" class="primary" type="button">Update</button>
+      <button id="update-dismiss" type="button">Later</button>
+    </div>
+    <div id="update-progress">
+      <div class="spinner"></div>
+      <span id="update-progress-line">Updating&#8230;</span>
+    </div>
   </div>
   <div id="close-prompt">
     <div class="dialog">
@@ -816,7 +911,19 @@ const SHELL_HTML: &str = r#"<!doctype html>
       document.getElementById('update-version').textContent = version;
       document.getElementById('update-notes').href =
         'https://github.com/butageek/pound/releases/tag/' + encodeURIComponent(version);
-      document.getElementById('update').style.display = 'flex';
+      document.getElementById('update').style.display = 'block';
+    },
+    // The installer is running: lock the editor (the file on disk is about
+    // to be replaced) and mirror the installer's progress lines.
+    setUpdating() {
+      setSaveEnabled(false);
+      sourceEl.disabled = true;
+      document.getElementById('update-offer').style.display = 'none';
+      document.getElementById('update-progress').style.display = 'flex';
+    },
+    setUpdatingProgress(line) {
+      document.getElementById('update-progress-line').textContent =
+        line.replace(/^===>\s*/, '');
     },
     // Apply a theme preference (auto/light/dark). The select applies it
     // locally on change; the host only persists the choice.
@@ -1038,13 +1145,11 @@ const SHELL_HTML: &str = r#"<!doctype html>
   });
 
   // ---- update toast ---------------------------------------------------
-  const updateToast = document.getElementById('update');
-  document.getElementById('update-now').onclick = () => {
-    updateToast.style.display = 'none';
-    hostSend('update');
-  };
+  // "Update" keeps the toast visible: setUpdating (host-driven) swaps it
+  // to progress mode while the installer runs.
+  document.getElementById('update-now').onclick = () => hostSend('update');
   document.getElementById('update-dismiss').onclick = () =>
-    (updateToast.style.display = 'none');
+    (document.getElementById('update').style.display = 'none');
 
   // Tell the host this shell has parsed and pound.setContent is callable:
   // the initial content push races the page load, so the host re-sends on

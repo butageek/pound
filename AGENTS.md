@@ -171,16 +171,20 @@ Windows cross-check).
   HTTP-client dependency; silent on failure) and shows a bottom-right toast
   when newer. `is_newer` refuses anything unparseable (incl. prerelease
   suffixes) so it can never nag about a bogus version.
-- The toast's **Update & restart** posts `update` over ipc. In-place
+- The toast's **Update** posts `update` over ipc. In-place
   upgrade is possible exactly because the official installer already is
-  one: the app spawns `tools/install.ps1 -Relaunch` (CREATE_NO_WINDOW) and
-  exits; the installer closes any running Pound, replaces the exe,
-  re-registers and relaunches. Same trust path as the one-liner (HTTPS to
-  github.com). With unsaved edits the close prompt runs first — Save or
-  Don't save proceed to the installer, Cancel posts `cancel-exit` and
-  clears the pending update.
+  one: the app spawns `tools/install.ps1 -Relaunch -OpenPath <file>`
+  (CREATE_NO_WINDOW, stdout piped) and STAYS ALIVE showing progress — the
+  installer's own Write-Step lines stream into the toast, and its
+  graceful close closes the app at the replace step (a failed spawn
+  falls back to a plain close/exit; with unsaved edits the close prompt
+  runs first — Save or Don't save proceed to the installer, Cancel posts
+  `cancel-exit` and clears the pending update). `-OpenPath` reopens the
+  previously open file after the relaunch.
 - GOTCHA: both the check and the installer are silent PowerShell spawns;
-  a failed upgrade just leaves the old version running.
+  a failed upgrade just leaves the old version running. While updating,
+  the editor is locked and CloseRequested exits without prompting (the
+  buffer was already saved or discarded).
 
 ## Windows integration notes (context for `register.rs`)
 

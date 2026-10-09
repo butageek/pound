@@ -45,7 +45,10 @@ param(
     [switch]$NoPath,
 
     # Relaunch Pound after installing (used by the in-app updater).
-    [switch]$Relaunch
+    [switch]$Relaunch,
+
+    # File to reopen on the relaunched Pound (used with -Relaunch).
+    [string]$OpenPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -272,5 +275,10 @@ else {
 
 if ($Relaunch) {
     Write-Step 'Relaunching Pound'
-    Start-Process -FilePath $targetExe
+    if ($OpenPath -ne '') {
+        Start-Process -FilePath $targetExe -ArgumentList ('"' + $OpenPath + '"')
+    }
+    else {
+        Start-Process -FilePath $targetExe
+    }
 }
