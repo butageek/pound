@@ -30,6 +30,16 @@ impl Presenter {
         self.model.dismiss_error();
     }
 
+    /// Apply an edit from the source pane (drives the live preview).
+    pub fn edit_source(&mut self, text: &str) {
+        self.model.edit(text);
+    }
+
+    /// Save unsaved edits back to the file.
+    pub fn save(&mut self) {
+        self.model.save();
+    }
+
     /// Called on a timer so external edits show up without a restart.
     pub fn reload_if_changed(&mut self) -> bool {
         self.model.reload_if_changed()

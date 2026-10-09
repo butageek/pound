@@ -25,7 +25,6 @@ use tao::event_loop::{ControlFlow, EventLoop};
 use tao::window::WindowBuilder;
 use wry::{http, WebView, WebViewBuilder, WebViewBuilderExtWindows};
 
-use crate::model::Document;
 use crate::presenter::Presenter;
 
 /// How often to check the document for on-disk changes.
@@ -43,6 +42,9 @@ pub fn run(file: Option<PathBuf>) {
 
     let shared = Rc::new(RefCell::new(Presenter::new(file.as_deref())));
     let dirty = Rc::new(Cell::new(false));
+    // Set when a push must refresh only the preview (edits/save acks):
+    // rewriting the textarea would destroy the caret and scroll position.
+    let preview = Rc::new(Cell::new(false));
 
     let builder = WebViewBuilder::new()
         .with_html(SHELL_HTML)
@@ -60,10 +62,25 @@ pub fn run(file: Option<PathBuf>) {
     // document is still current, `pound` is undefined and the push is lost
     // (wry ignores script exceptions). The shell therefore posts `ready`
     // once its scripts have parsed (see SHELL_HTML) and we re-push then.
+    //
+    // The same channel carries editor traffic (strings only, framed by
+    // the first newline so the source text needs no escaping):
+    //   "ready"      shell parsed, push the document
+    //   "save"       Ctrl+S / Save button
+    //   "edit\n<text>"  the (debounced) editor buffer changed
+    let ipc_presenter = shared.clone();
     let ipc_dirty = dirty.clone();
+    let ipc_preview = preview.clone();
     let builder = builder.with_ipc_handler(move |request| {
-        if request.body().as_str() == "ready" {
+        let body = request.body();
+        if body == "ready" {
             ipc_dirty.set(true);
+        } else if body == "save" {
+            ipc_presenter.borrow_mut().save();
+            ipc_preview.set(true);
+        } else if let Some(text) = body.strip_prefix("edit\n") {
+            ipc_presenter.borrow_mut().edit_source(text);
+            ipc_preview.set(true);
         }
     });
     let webview = builder
@@ -105,12 +122,22 @@ pub fn run(file: Option<PathBuf>) {
                     shared.borrow_mut().reload_if_changed();
                 }
                 let revision = shared.borrow().model.revision;
-                if dirty.get() || revision != last_pushed {
+                let pushed = if preview.get() {
+                    // Edit-driven refresh: rendered pane + status only.
+                    preview.set(false);
+                    last_pushed = revision;
+                    push_rendered(&webview, &shared.borrow());
+                    true
+                } else if dirty.get() || revision != last_pushed {
                     dirty.set(false);
                     last_pushed = revision;
-                    let presenter = shared.borrow();
-                    push_document(&webview, &presenter);
-                    let title = current_title(&presenter);
+                    push_document(&webview, &shared.borrow());
+                    true
+                } else {
+                    false
+                };
+                if pushed {
+                    let title = current_title(&shared.borrow());
                     if title != last_title {
                         last_title = title;
                         window.set_title(&last_title);
@@ -192,50 +219,87 @@ fn mime_for(uri: &str) -> &'static str {
 
 fn current_title(presenter: &Presenter) -> String {
     match &presenter.model.document {
+        // `*` marks unsaved edits, the editor convention.
+        Some(doc) if presenter.model.dirty => format!("*{} — Pound", doc.name()),
         Some(doc) => format!("{} — Pound", doc.name()),
         None => "Pound".to_owned(),
     }
 }
 
-/// Push the model into the page. Kept as one JS call so a reload can restore
-/// the reading scroll position inside one script evaluation.
-fn push_document(webview: &WebView, presenter: &Presenter) {
-    let model = &presenter.model;
-    let (html, source, path, status) = match &model.document {
-        Some(doc) => (
-            doc.html.as_str(),
-            doc.source.as_str(),
-            doc.path.display().to_string(),
-            status_text(doc),
-        ),
-        None => ("", "", String::new(), String::new()),
-    };
-    let error = model.error.as_deref().unwrap_or("");
-    let js = format!(
-        "pound.setContent({}, {}, {}, {}, {}); pound.setError({});",
-        json_str(html),
-        json_str(source),
-        json_str(&current_title(presenter)),
-        json_str(&path),
-        json_str(&status),
-        json_str(error),
-    );
+/// Run a shell script. wry ignores JS exceptions (see the ready
+/// handshake), but transport failures still surface on stderr.
+fn eval_script(webview: &WebView, js: String) {
     if let Err(e) = webview.evaluate_script(&js) {
         eprintln!("pound: failed to update the view: {e}");
     }
 }
 
+/// Push the whole model into the page (document opened/reloaded): both
+/// panes, status bar, save state, title. The textarea is rewritten, so
+/// this must never run for edit-driven updates.
+fn push_document(webview: &WebView, presenter: &Presenter) {
+    let model = &presenter.model;
+    let (html, source, path) = match &model.document {
+        Some(doc) => (
+            doc.html.as_str(),
+            doc.source.as_str(),
+            doc.path.display().to_string(),
+        ),
+        None => ("", "", String::new()),
+    };
+    eval_script(
+        webview,
+        format!(
+            "pound.setContent({}, {}, {}, {}, {}, {}); pound.setError({});",
+            json_str(html),
+            json_str(source),
+            json_str(&current_title(presenter)),
+            json_str(&path),
+            json_str(&status_text(presenter)),
+            model.dirty,
+            json_str(model.error.as_deref().unwrap_or("")),
+        ),
+    );
+}
+
+/// Push only the rendered pane, status bar and save state — the editor
+/// buffer (textarea) is left untouched so the caret, selection, undo stack
+/// and scroll position survive every keystroke round-trip.
+fn push_rendered(webview: &WebView, presenter: &Presenter) {
+    let model = &presenter.model;
+    let html = model.document.as_ref().map_or("", |doc| doc.html.as_str());
+    eval_script(
+        webview,
+        format!(
+            "pound.setRendered({}, {}, {}); pound.setError({});",
+            json_str(html),
+            json_str(&status_text(presenter)),
+            model.dirty,
+            json_str(model.error.as_deref().unwrap_or("")),
+        ),
+    );
+}
+
 /// Status-bar text for the open document: file type, character and line
-/// counts, e.g. `Markdown · 1,234 characters · 56 lines`.
-fn status_text(doc: &Document) -> String {
-    let chars = doc.source.chars().count();
-    let lines = doc.source.lines().count();
-    format!(
+/// counts plus the edit state, e.g. `Markdown · 1,234 characters · 56
+/// lines · edited`.
+fn status_text(presenter: &Presenter) -> String {
+    let Some(doc) = &presenter.model.document else {
+        return String::new();
+    };
+    let mut status = format!(
         "{} · {} characters · {} lines",
         doc.type_label(),
-        group_digits(chars),
-        group_digits(lines),
-    )
+        group_digits(doc.source.chars().count()),
+        group_digits(doc.source.lines().count()),
+    );
+    if presenter.model.dirty {
+        status.push_str(" · edited");
+    }
+    if presenter.model.stale {
+        status.push_str(" · changed on disk");
+    }
+    status
 }
 
 /// Group digits in threes (1234567 -> 1,234,567).
@@ -319,6 +383,13 @@ const SHELL_HTML: &str = r#"<!doctype html>
     background: var(--bg); border-bottom: 1px solid var(--border);
   }
   #topbar .brand { font-weight: 600; font-size: 14px; margin-right: 2px; }
+  #topbar button {
+    font: 13px "Segoe UI", system-ui, sans-serif; color: var(--text);
+    background: transparent; border: 1px solid var(--border); border-radius: 6px;
+    padding: 4px 12px; cursor: pointer;
+  }
+  #topbar button:hover:not(:disabled) { background: var(--hover); }
+  #topbar button:disabled { color: var(--muted); cursor: default; opacity: 0.6; }
   #topbar .spacer { flex: 1; }
   #topbar label.toggle {
     display: flex; align-items: center; gap: 6px; font-size: 13px;
@@ -373,15 +444,18 @@ const SHELL_HTML: &str = r#"<!doctype html>
     flex: 1 1 0; min-width: 0;
     overflow-y: auto; scrollbar-gutter: stable; background: var(--bg);
   }
-  #source-wrap {
-    display: none; flex: 1 1 0; min-width: 0;
-    overflow: auto; scrollbar-gutter: stable; background: var(--bg);
-  }
+  #source-wrap { display: none; flex: 1 1 0; min-width: 0; background: var(--bg); }
   body.split #source-wrap { display: block; }
+  /* The source pane is a plain textarea: a real editor with native caret,
+     selection and undo. It is never rewritten during editing (pushes go to
+     pound.setRendered) so that state survives every keystroke. */
   #source {
-    margin: 0; padding: 14px 18px 60px;
+    display: block; width: 100%; height: 100%; margin: 0;
+    padding: 14px 18px 60px; border: 0; outline: none; resize: none;
+    background: transparent; color: var(--text);
     font: 12.5px/1.6 Consolas, "Cascadia Mono", monospace;
     white-space: pre; tab-size: 4;
+    overflow: auto; scrollbar-gutter: stable;
   }
 
   /* ---- status bar ---- */
@@ -467,6 +541,7 @@ const SHELL_HTML: &str = r#"<!doctype html>
   <div id="topbar">
     <span class="brand">Pound</span>
     <span class="spacer"></span>
+    <button id="save" type="button" disabled>Save <kbd>Ctrl+S</kbd></button>
     <label class="toggle">
       <input type="checkbox" id="source-toggle"> Source <kbd>Ctrl+U</kbd>
     </label>
@@ -482,7 +557,7 @@ const SHELL_HTML: &str = r#"<!doctype html>
       </div>
       <article id="content"></article>
     </div>
-    <div id="source-wrap"><pre id="source"></pre></div>
+    <div id="source-wrap"><textarea id="source" wrap="off" spellcheck="false"></textarea></div>
   </div>
   <div id="statusbar">
     <span id="status-path"></span>
@@ -491,7 +566,7 @@ const SHELL_HTML: &str = r#"<!doctype html>
   <div id="ctx-menu"><button id="ctx-copy" type="button">Copy <kbd>Ctrl+C</kbd></button></div>
 <script>
   window.pound = {
-    setContent(html, source, title, path, status) {
+    setContent(html, source, title, path, status, edited) {
       const wrap = document.getElementById('content-wrap');
       const scroll = wrap.scrollTop;
       const content = document.getElementById('content');
@@ -499,13 +574,28 @@ const SHELL_HTML: &str = r#"<!doctype html>
       content.innerHTML = html;
       content.style.display = html ? 'block' : 'none';
       welcome.style.display = html ? 'none' : 'flex';
-      document.getElementById('source').textContent = source;
+      sourceEl.value = source;
+      // Park the caret at the top: a value assignment leaves it at the
+      // end, so the first focus would auto-scroll the pane to the bottom.
+      sourceEl.setSelectionRange(0, 0);
       const statusPath = document.getElementById('status-path');
       statusPath.textContent = path || 'Ready';
       statusPath.title = path; // hover tooltip: the untruncated path
       document.getElementById('status-info').textContent = status;
+      setSaveEnabled(edited);
       if (title) document.title = title;
       wrap.scrollTop = scroll; // keep the reading position on reload
+      addCopyButtons();
+    },
+    // Edit-driven refresh (see push_rendered): update the preview, status
+    // bar and save state WITHOUT touching the editor buffer.
+    setRendered(html, status, edited) {
+      const wrap = document.getElementById('content-wrap');
+      const scroll = wrap.scrollTop;
+      document.getElementById('content').innerHTML = html;
+      wrap.scrollTop = scroll;
+      document.getElementById('status-info').textContent = status;
+      setSaveEnabled(edited);
       addCopyButtons();
     },
     setError(msg) {
@@ -571,7 +661,6 @@ const SHELL_HTML: &str = r#"<!doctype html>
   // block. Programmatic sets stamp a short per-pane suppression window so
   // the echo of our own scrolling never re-triggers the sync.
   const contentWrap = document.getElementById('content-wrap');
-  const sourceWrap = document.getElementById('source-wrap');
   const sourceEl = document.getElementById('source');
   const suppressEchoUntil = { source: 0, content: 0 };
   const setScrollTop = (which, el, y) => {
@@ -583,8 +672,9 @@ const SHELL_HTML: &str = r#"<!doctype html>
       const s = +el.dataset.lineStart;
       return { el, s, e: Math.max(+el.dataset.lineEnd, s + 1) };
     });
-  // The source pane is plain <pre> text: a fixed line height and top
-  // padding turn a scroll offset into a (fractional) line number and back.
+  // The source pane is fixed-metrics text (12.5px/1.6 + padding): a line
+  // height and top padding turn a scroll offset into a (fractional) line
+  // number and back. The textarea is its own scroller.
   const sourceMetrics = () => {
     const cs = getComputedStyle(sourceEl);
     return { lh: parseFloat(cs.lineHeight) || 20, pad: parseFloat(cs.paddingTop) || 0 };
@@ -597,7 +687,7 @@ const SHELL_HTML: &str = r#"<!doctype html>
     const blocks = blocksWithLines();
     if (!blocks.length) return;
     const { lh, pad } = sourceMetrics();
-    const line = 1 + (sourceWrap.scrollTop - pad) / lh;
+    const line = 1 + (sourceEl.scrollTop - pad) / lh;
     let t = blocks[0];
     for (const b of blocks) { if (b.s <= line) t = b; else break; }
     const frac = Math.min(Math.max((line - t.s) / (t.e - t.s), 0), 1);
@@ -615,31 +705,73 @@ const SHELL_HTML: &str = r#"<!doctype html>
     const frac = Math.min(Math.max((viewY - top) / Math.max(t.el.offsetHeight, 1), 0), 1);
     const line = t.s + frac * (t.e - t.s);
     const { lh, pad } = sourceMetrics();
-    setScrollTop('source', sourceWrap, pad + (line - 1) * lh);
+    setScrollTop('source', sourceEl, pad + (line - 1) * lh);
   }
 
-  sourceWrap.addEventListener('scroll', () => {
+  sourceEl.addEventListener('scroll', () => {
     if (Date.now() >= suppressEchoUntil.source) syncContentFromSource();
   }, { passive: true });
   contentWrap.addEventListener('scroll', () => {
     if (Date.now() >= suppressEchoUntil.content) syncSourceFromContent();
   }, { passive: true });
 
+  // ---- editor: live preview + save -----------------------------------
+  const saveBtn = document.getElementById('save');
+  const setSaveEnabled = on => (saveBtn.disabled = !on);
+  const hostSend = msg => { if (window.ipc) window.ipc.postMessage(msg); };
+  saveBtn.onclick = () => hostSend('save');
+
+  // Typing: debounce, then hand the buffer to the host for re-rendering
+  // (Rust owns rendering + sanitization; the result comes back through
+  // pound.setRendered, which never touches this textarea).
+  let editTimer = 0;
+  sourceEl.addEventListener('input', () => {
+    clearTimeout(editTimer);
+    editTimer = setTimeout(() => hostSend('edit\n' + sourceEl.value), 250);
+  });
+
+  addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      if (!saveBtn.disabled) hostSend('save');
+    }
+  });
+
+  // Tab indents (4 spaces, matching tab-size) instead of leaving the pane;
+  // execCommand keeps the insertion on the native undo stack.
+  sourceEl.addEventListener('keydown', e => {
+    if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      document.execCommand('insertText', false, '    ');
+    }
+  });
+
   // ---- context menu --------------------------------------------------
   // Minimal replacement for the disabled WebView2 default menu: a lone
   // Copy action, shown only when text is selected.
   const ctxMenu = document.getElementById('ctx-menu');
   const hideCtxMenu = () => ctxMenu.classList.remove('show');
+  // Selection text for Copy; the textarea too — form-control selections
+  // are not reliably reflected in window.getSelection().
+  const selectedText = () => {
+    const s = String(getSelection());
+    if (s) return s;
+    const el = document.activeElement;
+    if (el && el.value && el.selectionStart != null && el.selectionEnd != null) {
+      return el.value.slice(el.selectionStart, el.selectionEnd);
+    }
+    return '';
+  };
   document.addEventListener('contextmenu', e => {
     e.preventDefault();
-    if (!String(getSelection()).trim()) { hideCtxMenu(); return; }
+    if (!selectedText().trim()) { hideCtxMenu(); return; }
     ctxMenu.classList.add('show');
     // Open at the cursor, nudged back inside the window if it would overflow.
     ctxMenu.style.left = Math.min(e.clientX, innerWidth - ctxMenu.offsetWidth - 4) + 'px';
     ctxMenu.style.top = Math.min(e.clientY, innerHeight - ctxMenu.offsetHeight - 4) + 'px';
   });
   document.getElementById('ctx-copy').onclick = () => {
-    copyText(String(getSelection()));
+    copyText(selectedText());
     hideCtxMenu();
   };
   addEventListener('click', hideCtxMenu);

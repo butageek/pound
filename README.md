@@ -63,6 +63,10 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
   side-by-side panel showing the raw markdown. Shortcut: `Ctrl+U`.
 - **Synced scrolling** — in split view, scrolling either pane scrolls the
   other to the matching position (VSCode-style).
+- **Live editing** — the source pane is an editor: typing updates the
+  rendered preview instantly (debounced), `Ctrl+S` or the **Save** button
+  writes the file back to disk. The title bar and status bar mark
+  unsaved edits, and edits are never clobbered by on-disk changes.
 - **Status bar**: full path of the open file plus its type, character and
   line counts.
 - Full CommonMark via pulldown-cmark: tables, task lists, strikethrough,
@@ -104,6 +108,8 @@ into HTML+CSS instead of being hand-laid-out by the GUI toolkit.
 - Click **Source** (top right) or press `Ctrl+U` to toggle the side-by-side
   raw markdown panel. In split view, scrolling either pane scrolls the
   other to the matching position.
+- Edit the markdown in the source pane — the preview updates as you type;
+  press `Ctrl+S` (or click **Save**) to write the file. `Tab` indents.
 - Code blocks have a **Copy** button; links open in your default browser.
 - Saving the file in another editor updates the view automatically.
 
@@ -187,7 +193,6 @@ by `tools/gen_icon.py` (stdlib only, deterministic):
 Pound starts as a markdown reader and grows into a lightweight viewer and
 editor for more file types.
 
-- [ ] Markdown editing (edit in place, save back to disk)
 - [ ] More file types: CSV/TSV tables first, then plain text and beyond
 - [ ] Syntax highlighting for the source pane
 - [ ] Table of contents sidebar; footnotes; remote images

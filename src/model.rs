@@ -12,6 +12,9 @@ pub struct Document {
     pub source: String,
     pub html: String,
     pub modified: Option<SystemTime>,
+    /// The file used CRLF line endings. The editor buffer is LF (the DOM
+    /// normalizes), so saving converts back to keep diffs noise-free.
+    pub crlf: bool,
 }
 
 impl Document {
@@ -23,11 +26,13 @@ impl Document {
         let source = fs::read_to_string(&absolute)
             .map_err(|e| format!("cannot read {}: {e}", absolute.display()))?;
         let modified = fs::metadata(&absolute).and_then(|m| m.modified()).ok();
+        let crlf = source.contains("\r\n");
         Ok(Document {
             html: markdown::to_html(&source, absolute.parent().unwrap_or(Path::new("."))),
             path: absolute,
             source,
             modified,
+            crlf,
         })
     }
 
@@ -78,9 +83,14 @@ pub struct Model {
     pub document: Option<Document>,
     /// Last user-facing error, shown as a banner.
     pub error: Option<String>,
-    /// Bumped every time the document is (re)loaded; lets the view
-    /// invalidate caches such as loaded image textures.
+    /// Bumped every time the document is (re)loaded or edited; lets the
+    /// view invalidate caches such as loaded image textures.
     pub revision: u64,
+    /// Unsaved edits are in memory (the source pane is an editor).
+    pub dirty: bool,
+    /// The file changed on disk while unsaved edits exist; auto-reload is
+    /// paused until they are saved (unsaved edits always win).
+    pub stale: bool,
 }
 
 impl Model {
@@ -89,6 +99,8 @@ impl Model {
             Ok(doc) => {
                 self.document = Some(doc);
                 self.error = None;
+                self.dirty = false;
+                self.stale = false;
                 self.revision += 1;
             }
             Err(e) => self.error = Some(e),
@@ -106,8 +118,52 @@ impl Model {
         self.error = None;
     }
 
-    /// Reload the document if its modification time changed on disk.
-    /// Returns `true` when the document was reloaded.
+    /// Apply an edit from the source pane: replace the buffer, re-render
+    /// the preview and remember that it is unsaved. Identical text is a
+    /// no-op (no spurious re-render or revision bump).
+    pub fn edit(&mut self, text: &str) {
+        let Some(doc) = self.document.as_mut() else {
+            return;
+        };
+        if doc.source == text {
+            return;
+        }
+        doc.source = text.to_owned();
+        doc.html = markdown::to_html(&doc.source, doc.path.parent().unwrap_or(Path::new(".")));
+        self.revision += 1;
+        self.dirty = true;
+    }
+
+    /// Write unsaved edits back to disk, preserving the file's original
+    /// line-ending style. Last writer wins if the file changed on disk.
+    pub fn save(&mut self) {
+        let Some(doc) = &self.document else { return };
+        if !self.dirty {
+            return;
+        }
+        let text = if doc.crlf {
+            doc.source.replace('\n', "\r\n")
+        } else {
+            doc.source.clone()
+        };
+        let written = fs::write(&doc.path, text)
+            .and_then(|_| fs::metadata(&doc.path))
+            .and_then(|m| m.modified());
+        match written {
+            Ok(modified) => {
+                self.dirty = false;
+                self.stale = false;
+                if let Some(doc) = self.document.as_mut() {
+                    doc.modified = Some(modified);
+                }
+            }
+            Err(e) => self.error = Some(format!("cannot save {}: {e}", doc.path.display())),
+        }
+    }
+
+    /// Reload the document if its modification time changed on disk and
+    /// there is nothing unsaved to protect. Returns `true` when the
+    /// document was reloaded.
     pub fn reload_if_changed(&mut self) -> bool {
         let Some(doc) = &self.document else {
             return false;
@@ -118,12 +174,25 @@ impl Model {
         let Ok(modified) = meta.modified() else {
             return false;
         };
-        if doc.modified != Some(modified) {
-            self.reload();
-            true
-        } else {
-            false
+        if doc.modified == Some(modified) {
+            return false;
         }
+        // Unsaved edits always win over the disk: pause auto-reload and
+        // surface the conflict in the status bar instead of clobbering.
+        if self.dirty {
+            self.stale = true;
+            return false;
+        }
+        // An mtime touch with identical content (e.g. a save from another
+        // Pound window) must not reset the editor for no visible reason.
+        if fs::read_to_string(&doc.path).is_ok_and(|disk| disk == doc.source) {
+            if let Some(doc) = self.document.as_mut() {
+                doc.modified = Some(modified);
+            }
+            return false;
+        }
+        self.reload();
+        true
     }
 }
 
@@ -188,6 +257,7 @@ mod tests {
                 source: String::new(),
                 html: String::new(),
                 modified: None,
+                crlf: false,
             }
         }
         assert_eq!(doc_with("md").type_label(), "Markdown");
@@ -196,6 +266,132 @@ mod tests {
         assert_eq!(doc_with("json").type_label(), "JSON file");
         assert_eq!(doc_with("csv").type_label(), "CSV file");
         assert_eq!(doc_with("").type_label(), "File");
+    }
+
+    /// Force a new mtime on `path` (some filesystems share timestamps,
+    /// so rewriting the file alone may not change it).
+    fn bump_mtime(path: &Path) {
+        let later = SystemTime::now() + Duration::from_secs(5);
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+    }
+
+    #[test]
+    fn edits_rerender_and_mark_dirty() {
+        let path = temp_md("edit.md", "# v1");
+        let mut model = Model::default();
+        model.open(&path);
+        let before = model.revision;
+
+        model.edit(
+            "# v2
+
+new **body**",
+        );
+        let doc = model.document.as_ref().unwrap();
+        assert_eq!(
+            doc.source,
+            "# v2
+
+new **body**"
+        );
+        assert!(doc.html.contains("<h1>v2</h1>"));
+        assert!(doc.html.contains("<strong>body</strong>"));
+        assert!(model.dirty);
+        assert_eq!(model.revision, before + 1);
+
+        // Identical text is a no-op (no spurious re-render/revision bump).
+        model.edit(
+            "# v2
+
+new **body**",
+        );
+        assert_eq!(model.revision, before + 1);
+    }
+
+    #[test]
+    fn save_writes_edits_and_clears_dirty() {
+        let path = temp_md("save.md", "# v1");
+        let mut model = Model::default();
+        model.open(&path);
+        model.edit("# v2");
+        model.save();
+
+        assert!(!model.dirty);
+        assert_eq!(model.error, None);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# v2");
+        // Saved content matches disk: the poll must not "reload" it.
+        assert!(!model.reload_if_changed());
+    }
+
+    #[test]
+    fn save_failure_sets_error_banner() {
+        let mut model = Model::default();
+        model.document = Some(Document {
+            path: std::env::temp_dir().join("pound-no-such-dir/x.md"),
+            source: "# x".to_owned(),
+            html: String::new(),
+            modified: None,
+            crlf: false,
+        });
+        model.dirty = true;
+        model.save();
+        assert!(model.dirty, "failed save keeps the unsaved state");
+        assert!(model.error.as_deref().unwrap_or("").contains("cannot save"));
+    }
+
+    #[test]
+    fn crlf_line_endings_survive_edit_and_save() {
+        let path = temp_md("crlf.md", "a\r\nb\r\n");
+        let mut model = Model::default();
+        model.open(&path);
+        assert!(model.document.as_ref().unwrap().crlf);
+
+        // The DOM reports the editor buffer with LF only.
+        model.edit("a\nb\nc");
+        model.save();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "a\r\nb\r\nc");
+    }
+
+    #[test]
+    fn unsaved_edits_pause_disk_reload_and_mark_stale() {
+        let path = temp_md("conflict.md", "# disk v1");
+        let mut model = Model::default();
+        model.open(&path);
+        model.edit("# my edit");
+
+        // The file changes on disk under the unsaved edit.
+        fs::write(&path, "# disk v2").unwrap();
+        bump_mtime(&path);
+
+        assert!(!model.reload_if_changed());
+        assert!(model.stale);
+        assert!(model.document.as_ref().unwrap().source.contains("my edit"));
+
+        // Saving resolves the conflict by writing the buffer (last writer
+        // wins) and clears the notice.
+        model.save();
+        assert!(!model.stale);
+        assert!(fs::read_to_string(&path).unwrap().contains("my edit"));
+    }
+
+    #[test]
+    fn identical_disk_touch_does_not_reload() {
+        let path = temp_md("touch.md", "# v1");
+        let mut model = Model::default();
+        model.open(&path);
+        let revision = model.revision;
+
+        // Same bytes, newer mtime: not a reload.
+        fs::write(&path, "# v1").unwrap();
+        bump_mtime(&path);
+
+        assert!(!model.reload_if_changed());
+        assert_eq!(model.revision, revision);
     }
 
     #[test]

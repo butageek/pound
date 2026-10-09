@@ -8,10 +8,11 @@ same conventions.)
 
 Pound is a lightweight file viewer for Windows written in Rust (tao +
 wry + pulldown-cmark). It started as a markdown reader — `.md` files
-render by default with the raw source side by side (Ctrl+U) — and is
-growing into an editor and a viewer for more commonly used file types
-(CSV next). Architecture is strict MVP (Model–View–Presenter) — keep it
-that way:
+render by default with the raw source side by side (Ctrl+U), and the
+source pane is a live editor: typing re-renders the preview and `Ctrl+S`
+saves back to disk. It is growing into a viewer for more commonly used
+file types (CSV next). Architecture is strict MVP
+(Model–View–Presenter) — keep it that way:
 
 | Layer | File | Rule |
 |---|---|---|
@@ -81,6 +82,19 @@ that way:
   ammonia via a generic attribute prefix (inert — scripts are stripped),
   and only direct children of `#content` count as sync anchors, so a
   file's raw HTML can't forge them.
+- Editing (the source pane is a `<textarea>`): typing is debounced 250ms
+  in the shell, then posted as `edit\n<buffer>` over `window.ipc`; the
+  model re-renders (Rust owns rendering + ammonia) and the view answers
+  with `pound.setRendered(html, status, edited)` — which NEVER rewrites
+  the textarea, so caret/selection/undo/scroll survive every keystroke.
+  Full `pound.setContent(...)` (textarea rewrite + caret parked at top)
+  runs only for real document loads. `save` posts over the same channel;
+  `model.save` preserves the file's CRLF/LF style (the DOM normalizes the
+  buffer to LF).
+- Disk-conflict policy: unsaved edits pause auto-reload. The status bar
+  shows `edited`, plus `changed on disk` when the file was modified
+  externally (saving resolves it, last writer wins); a same-content mtime
+  touch never reloads. The window title prefixes `*` while unsaved.
 - Right-click: WebView2's default context menu (Chromium's Copy / Print /
   empty "More tools" submenu) is disabled via
   `with_default_context_menus(false)`; the shell shows a minimal Copy-only
