@@ -526,8 +526,8 @@ fn window_icon() -> Option<tao::window::Icon> {
 
 // ---------------------------------------------------------------------------
 // The shell document: top bar, rendered pane, source pane, status bar. The
-// markdown styles use a GitHub-style palette with a Segoe UI / Consolas stack
-// for native Windows typography.
+// markdown styles use the Solarized Light / One Dark palettes with a
+// Segoe UI / Consolas stack for native Windows typography.
 // ---------------------------------------------------------------------------
 
 const SHELL_HTML: &str = r#"<!doctype html>
@@ -538,20 +538,22 @@ const SHELL_HTML: &str = r#"<!doctype html>
   /* The theme is resolved by the head script (the persisted choice is
      injected as window.poundTheme; Auto follows the system) and applied
      as <html data-theme="light|dark">. color-scheme themes scrollbars and
-     form controls to match. */
+     form controls to match. Palettes: Solarized Light (Ethan Schoonover's
+     classic glare-reducing cream) and One Dark (Atom/Zed's soft slate) —
+     the eye-comfort standards from the editor world. */
   :root {
     color-scheme: light;
-    --bg: #ffffff; --text: #24292f; --muted: #656d76; --border: #d0d7de;
-    --link: #0969da; --code-bg: rgba(175,184,193,0.2); --code-block-bg: #f6f8fa;
-    --th-bg: #f6f8fa; --hover: rgba(175,184,193,0.25);
-    --error-fg: #cf222e; --error-bg: rgba(207,34,46,0.08);
+    --bg: #fdf6e3; --text: #586e75; --muted: #93a1a1; --border: #eee8d5;
+    --link: #268bd2; --code-bg: rgba(147,161,161,0.18); --code-block-bg: #f3ecda;
+    --th-bg: #eee8d5; --hover: rgba(147,161,161,0.15);
+    --error-fg: #dc322f; --error-bg: rgba(220,50,47,0.08);
   }
   :root[data-theme="dark"] {
     color-scheme: dark;
-    --bg: #0d1117; --text: #e6edf3; --muted: #8b949e; --border: #30363d;
-    --link: #58a6ff; --code-bg: rgba(110,118,129,0.4); --code-block-bg: #161b22;
-    --th-bg: #161b22; --hover: rgba(110,118,129,0.25);
-    --error-fg: #f85149; --error-bg: rgba(248,81,73,0.1);
+    --bg: #282c34; --text: #abb2bf; --muted: #7f8792; --border: #3e4451;
+    --link: #61afef; --code-bg: rgba(171,178,191,0.15); --code-block-bg: #2c313a;
+    --th-bg: #2c313a; --hover: rgba(171,178,191,0.12);
+    --error-fg: #e06c75; --error-bg: rgba(224,108,117,0.12);
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -727,7 +729,7 @@ const SHELL_HTML: &str = r#"<!doctype html>
     font-family: Consolas, monospace; font-size: 12.5px;
   }
 
-  /* ---- markdown content (GitHub-style palette) ---- */
+  /* ---- markdown content (Solarized Light / One Dark palettes) ---- */
   #content {
     /* Full pane width like VSCode's preview (no centered reading column). */
     padding: 26px 40px 120px;
