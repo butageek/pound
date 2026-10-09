@@ -7,8 +7,9 @@
 //!
 //! - Rust -> JS: `webview.evaluate_script` pushes rendered HTML, source
 //!   text, title and errors as JSON-escaped strings.
-//! - JS -> Rust: the toolbar navigates to `pound://…` URLs, which the
-//!   navigation handler intercepts and turns into presenter intents.
+//! - JS -> Rust: in-page controls navigate to `pound://…` URLs (the error
+//!   banner's dismiss), which the navigation handler intercepts and turns
+//!   into presenter intents.
 //! - Local images are served through the `poundimg://` custom protocol.
 
 use std::cell::{Cell, RefCell};
@@ -22,6 +23,7 @@ use tao::event_loop::{ControlFlow, EventLoop};
 use tao::window::WindowBuilder;
 use wry::{http, WebView, WebViewBuilder};
 
+use crate::model::Document;
 use crate::presenter::Presenter;
 
 /// How often to check the document for on-disk changes.
@@ -104,24 +106,11 @@ pub fn run(file: Option<PathBuf>) {
     });
 }
 
-/// Toolbar buttons navigate to `pound://…`; web links open externally.
+/// In-page controls navigate to `pound://…`; web links open externally.
 /// Everything else (the initial document, in-page anchors) is allowed.
 fn handle_navigation(url: &str, presenter: &mut Presenter, dirty: &Cell<bool>) -> bool {
     if let Some(command) = url.strip_prefix("pound://") {
         match command.split(['?', '#']).next().unwrap_or("") {
-            "open" => {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Markdown", &["md", "markdown"])
-                    .pick_file()
-                {
-                    presenter.open_path(&path);
-                    dirty.set(true);
-                }
-            }
-            "reload" => {
-                presenter.reload();
-                dirty.set(true);
-            }
             "dismiss-error" => {
                 presenter.dismiss_error();
                 dirty.set(true);
@@ -195,26 +184,54 @@ fn current_title(presenter: &Presenter) -> String {
 /// the reading scroll position inside one script evaluation.
 fn push_document(webview: &WebView, presenter: &Presenter) {
     let model = &presenter.model;
-    let (html, source, path) = match &model.document {
+    let (html, source, path, status) = match &model.document {
         Some(doc) => (
             doc.html.as_str(),
             doc.source.as_str(),
             doc.path.display().to_string(),
+            status_text(doc),
         ),
-        None => ("", "", String::new()),
+        None => ("", "", String::new(), String::new()),
     };
     let error = model.error.as_deref().unwrap_or("");
     let js = format!(
-        "pound.setContent({}, {}, {}, {}); pound.setError({});",
+        "pound.setContent({}, {}, {}, {}, {}); pound.setError({});",
         json_str(html),
         json_str(source),
         json_str(&current_title(presenter)),
         json_str(&path),
+        json_str(&status),
         json_str(error),
     );
     if let Err(e) = webview.evaluate_script(&js) {
         eprintln!("pound: failed to update the view: {e}");
     }
+}
+
+/// Status-bar text for the open document: file type, character and line
+/// counts, e.g. `Markdown · 1,234 characters · 56 lines`.
+fn status_text(doc: &Document) -> String {
+    let chars = doc.source.chars().count();
+    let lines = doc.source.lines().count();
+    format!(
+        "{} · {} characters · {} lines",
+        doc.type_label(),
+        group_digits(chars),
+        group_digits(lines),
+    )
+}
+
+/// Group digits in threes (1234567 -> 1,234,567).
+fn group_digits(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Encode a &str as a double-quoted JavaScript string literal (our own HTML
@@ -246,9 +263,9 @@ fn window_icon() -> Option<tao::window::Icon> {
 }
 
 // ---------------------------------------------------------------------------
-// The shell document: top bar, rendered pane, source pane. The markdown
-// styles use a GitHub-style palette with a Segoe UI / Consolas stack for
-// native Windows typography.
+// The shell document: top bar, rendered pane, source pane, status bar. The
+// markdown styles use a GitHub-style palette with a Segoe UI / Consolas stack
+// for native Windows typography.
 // ---------------------------------------------------------------------------
 
 const SHELL_HTML: &str = r#"<!doctype html>
@@ -285,17 +302,7 @@ const SHELL_HTML: &str = r#"<!doctype html>
     background: var(--bg); border-bottom: 1px solid var(--border);
   }
   #topbar .brand { font-weight: 600; font-size: 14px; margin-right: 2px; }
-  #topbar button {
-    font: 13px "Segoe UI", system-ui, sans-serif; color: var(--text);
-    background: transparent; border: 1px solid var(--border); border-radius: 6px;
-    padding: 4px 12px; cursor: pointer;
-  }
-  #topbar button:hover { background: var(--hover); }
   #topbar .spacer { flex: 1; }
-  #path {
-    color: var(--muted); font-size: 12px; max-width: 40%;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
   #topbar label.toggle {
     display: flex; align-items: center; gap: 6px; font-size: 13px;
     cursor: pointer; user-select: none;
@@ -326,7 +333,7 @@ const SHELL_HTML: &str = r#"<!doctype html>
      The 1px divider lives in the container gap (not inside a pane) and
      scrollbar-gutter keeps a scrolling pane from becoming narrower. */
   #main {
-    display: flex; height: calc(100vh - 44px); margin-top: 44px;
+    display: flex; height: calc(100vh - 44px - 26px); margin-top: 44px;
     column-gap: 1px; background: var(--border);
   }
   #content-wrap {
@@ -343,6 +350,19 @@ const SHELL_HTML: &str = r#"<!doctype html>
     font: 12.5px/1.6 Consolas, "Cascadia Mono", monospace;
     white-space: pre; tab-size: 4;
   }
+
+  /* ---- status bar ---- */
+  #statusbar {
+    position: fixed; inset: auto 0 0 0; height: 26px; z-index: 10;
+    display: flex; align-items: center; gap: 14px; padding: 0 12px;
+    background: var(--bg); border-top: 1px solid var(--border);
+    color: var(--muted); font-size: 12px;
+  }
+  #status-path {
+    flex: 1 1 auto; min-width: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #status-info { flex: 0 0 auto; user-select: none; }
 
   /* ---- welcome ---- */
   #welcome {
@@ -413,10 +433,7 @@ const SHELL_HTML: &str = r#"<!doctype html>
 <body>
   <div id="topbar">
     <span class="brand">Pound</span>
-    <button id="open" type="button">Open&#8230;</button>
-    <button id="reload" type="button">Reload</button>
     <span class="spacer"></span>
-    <span id="path"></span>
     <label class="toggle">
       <input type="checkbox" id="source-toggle"> Source <kbd>Ctrl+U</kbd>
     </label>
@@ -434,9 +451,13 @@ const SHELL_HTML: &str = r#"<!doctype html>
     </div>
     <div id="source-wrap"><pre id="source"></pre></div>
   </div>
+  <div id="statusbar">
+    <span id="status-path"></span>
+    <span id="status-info"></span>
+  </div>
 <script>
   window.pound = {
-    setContent(html, source, title, path) {
+    setContent(html, source, title, path, status) {
       const wrap = document.getElementById('content-wrap');
       const scroll = wrap.scrollTop;
       const content = document.getElementById('content');
@@ -445,7 +466,10 @@ const SHELL_HTML: &str = r#"<!doctype html>
       content.style.display = html ? 'block' : 'none';
       welcome.style.display = html ? 'none' : 'flex';
       document.getElementById('source').textContent = source;
-      document.getElementById('path').textContent = path;
+      const statusPath = document.getElementById('status-path');
+      statusPath.textContent = path || 'Ready';
+      statusPath.title = path; // hover tooltip: the untruncated path
+      document.getElementById('status-info').textContent = status;
       if (title) document.title = title;
       wrap.scrollTop = scroll; // keep the reading position on reload
       addCopyButtons();
@@ -488,8 +512,6 @@ const SHELL_HTML: &str = r#"<!doctype html>
     try { document.execCommand('copy'); } finally { ta.remove(); }
   }
 
-  document.getElementById('open').onclick = () => (location.href = 'pound://open');
-  document.getElementById('reload').onclick = () => (location.href = 'pound://reload');
   document.getElementById('dismiss').onclick = () => (location.href = 'pound://dismiss-error');
 
   const toggle = document.getElementById('source-toggle');

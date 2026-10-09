@@ -30,11 +30,6 @@ impl Presenter {
         self.model.dismiss_error();
     }
 
-    /// Reopen the current document from disk.
-    pub fn reload(&mut self) {
-        self.model.reload();
-    }
-
     /// Called on a timer so external edits show up without a restart.
     pub fn reload_if_changed(&mut self) -> bool {
         self.model.reload_if_changed()
@@ -92,11 +87,10 @@ mod tests {
     }
 
     #[test]
-    fn reload_and_watch_are_noops_without_a_document() {
+    fn watch_is_a_noop_without_a_document() {
         let mut presenter = Presenter {
             model: Model::default(),
         };
-        presenter.reload();
         assert!(!presenter.reload_if_changed());
         assert!(presenter.model.error.is_none());
     }

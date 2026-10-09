@@ -51,10 +51,14 @@ that way:
 - Guiding principle: "the file's bytes are the truth; rendering is a
   layer; when rendering fails, fall back to source, never eat content."
 - Rust → JS: `push_document` evaluates `pound.setContent(html, source,
-  title, path)` + `pound.setError(msg)` — strings JSON-escaped by `json_str`
-  (quoting only; XSS is handled by ammonia).
-- JS → Rust: toolbar buttons navigate to `pound://open|reload|dismiss-error`,
-  intercepted by the navigation handler which calls presenter intents.
+  title, path, status)` + `pound.setError(msg)` — strings JSON-escaped by
+  `json_str` (quoting only; XSS is handled by ammonia). `status` feeds the
+  bottom status bar (path + file type + char/line counts; `model.rs` strips
+  the `\\?\` verbatim prefix `canonicalize` adds, so users see `C:\…`).
+- JS → Rust: in-page controls navigate to `pound://dismiss-error` (error
+  banner), intercepted by the navigation handler which calls presenter
+  intents. There is deliberately no Open/Reload UI: files arrive by
+  double-click, drag-and-drop or CLI, and on-disk edits auto-reload.
   http(s)/mailto links are opened externally and never navigate the reader.
 - Local images: `markdown.rs` rewrites relative srcs to percent-encoded
   `poundimg://<abs path>`; the view serves them from disk via a custom

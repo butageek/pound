@@ -18,7 +18,6 @@ open = "5"
 [target.'cfg(windows)'.dependencies]
 tao = "0.37"
 wry = "0.57"
-rfd = "0.15"
 winreg = "0.55"
 windows-sys = { version = "0.60", features = [
     "Win32_UI_Shell",

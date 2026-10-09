@@ -57,10 +57,12 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
   — the same class of engine VSCode's preview uses — with a GitHub-style
   stylesheet and native Segoe UI / Consolas typography. Light & dark
   themes follow the system.
-- Opens `.md` / `.markdown` files from double-click, drag-and-drop,
-  `Open…`, or the command line (`pound file.md`).
+- Opens `.md` / `.markdown` files from double-click, drag-and-drop, or the
+  command line (`pound file.md`).
 - **Rendered view by default**, with a **Source toggle** that opens a
   side-by-side panel showing the raw markdown. Shortcut: `Ctrl+U`.
+- **Status bar**: full path of the open file plus its type, character and
+  line counts.
 - Full CommonMark via pulldown-cmark: tables, task lists, strikethrough,
   inline HTML (sanitized), local images (served via a custom `poundimg://`
   protocol), links open in your browser, code blocks have copy buttons.
@@ -76,14 +78,14 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
 |---|---|---|
 | Model | `src/model.rs` | App state: open document (source + rendered HTML), source toggle, errors, reload revision. No UI types. |
 | Rendering input | `src/markdown.rs` | pulldown-cmark → HTML; rewrites local images to `poundimg://`; sanitizes with ammonia. Unit-tested headlessly. |
-| Presenter | `src/presenter.rs` | User intents: open/reload/toggle, drag-and-drop routing, link opening. Owns the Model. |
-| View | `src/view.rs` | WebView2 shell (tao + wry): top bar, rendered pane, source pane. Displays the model, forwards intents. |
+| Presenter | `src/presenter.rs` | User intents: open/toggle, drag-and-drop routing, link opening. Owns the Model. |
+| View | `src/view.rs` | WebView2 shell (tao + wry): top bar, rendered pane, source pane, status bar. Displays the model, forwards intents. |
 | Windows glue | `src/register.rs` | Registry integration (`register` / `unregister` subcommands). |
 
 ```
  double-click .md ─┐
  drag & drop ──────┤        ┌─────────────────┐  intents   ┌────────────┐ state ┌───────┐
- Open… button ─────┼─────► │  View           │ ─────────► │ Presenter  │ ────► │ Model │
+ CLI argument ─────┼─────► │  View           │ ─────────► │ Presenter  │ ────► │ Model │
  Ctrl+U toggle ────┘       │  (WebView2/wry) │ ◄───────── │            │ ◄───  │       │
                             └─────────────────┘  HTML push └────────────┘       └───────┘
 ```

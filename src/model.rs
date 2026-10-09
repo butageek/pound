@@ -16,9 +16,10 @@ pub struct Document {
 
 impl Document {
     pub fn load(path: &Path) -> Result<Document, String> {
-        let absolute = path
-            .canonicalize()
-            .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+        let absolute = strip_verbatim_prefix(
+            path.canonicalize()
+                .map_err(|e| format!("cannot open {}: {e}", path.display()))?,
+        );
         let source = fs::read_to_string(&absolute)
             .map_err(|e| format!("cannot read {}: {e}", absolute.display()))?;
         let modified = fs::metadata(&absolute).and_then(|m| m.modified()).ok();
@@ -37,6 +38,38 @@ impl Document {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "untitled".to_string())
     }
+
+    /// Human-facing file type for the status bar, e.g. `Markdown` or `TXT file`.
+    pub fn type_label(&self) -> String {
+        let ext = self
+            .path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        match ext.as_str() {
+            "md" | "markdown" => "Markdown".to_owned(),
+            "txt" => "Plain text".to_owned(),
+            "" => "File".to_owned(),
+            other => format!("{} file", other.to_ascii_uppercase()),
+        }
+    }
+}
+
+/// `Path::canonicalize` returns Windows verbatim paths (`\\?\C:\…`,
+/// `\\?\UNC\server\share`), which read as gibberish to users. Unwrap the
+/// prefix so every display site shows ordinary paths (`C:\…`,
+/// `\\server\share`); the plain form is accepted by every filesystem API
+/// just as well. No-op on other platforms.
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let text = path.as_os_str().to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest.to_owned());
+    }
+    path
 }
 
 /// All mutable application state.
@@ -129,6 +162,40 @@ mod tests {
         model.open(Path::new("/definitely/not/here.md"));
         assert!(model.document.is_none());
         assert!(model.error.is_some());
+    }
+
+    #[test]
+    fn verbatim_prefix_is_stripped_after_canonicalize() {
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"\\?\C:\Users\me\backup plan\notes.md")),
+            PathBuf::from(r"C:\Users\me\backup plan\notes.md")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\notes.md")),
+            PathBuf::from(r"\\server\share\notes.md")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from("/home/me/notes.md")),
+            PathBuf::from("/home/me/notes.md")
+        );
+    }
+
+    #[test]
+    fn type_label_names_common_types() {
+        fn doc_with(ext: &str) -> Document {
+            Document {
+                path: PathBuf::from(format!("C:\\notes.{ext}")),
+                source: String::new(),
+                html: String::new(),
+                modified: None,
+            }
+        }
+        assert_eq!(doc_with("md").type_label(), "Markdown");
+        assert_eq!(doc_with("markdown").type_label(), "Markdown");
+        assert_eq!(doc_with("txt").type_label(), "Plain text");
+        assert_eq!(doc_with("json").type_label(), "JSON file");
+        assert_eq!(doc_with("csv").type_label(), "CSV file");
+        assert_eq!(doc_with("").type_label(), "File");
     }
 
     #[test]
