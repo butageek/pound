@@ -98,6 +98,15 @@ powershell -ExecutionPolicy Bypass -File tools/install.ps1 -SetDefault  # on Win
    generated from the commits since the previous tag. Users install with the
    one-liner in the README (the installer fetches `pound-*-win64.zip` from
    the latest release via the GitHub API).
+4. Rewrite the release notes user-facing — the auto-generated commit list
+   is only a placeholder:
+   ```bash
+   gh release edit vX.Y.Z --notes-file <file>
+   ```
+   House style (see v0.1.0/v0.1.1/v0.2.0): `# vX.Y.Z` header, one-line
+   summary, `**Bold lead** — description` bullets covering user-visible
+   changes only, wrapped ~76 columns. Editing later is safe — release.yml
+   sets notes at creation time and never touches an existing body.
 
 Everyday pushes to main are preservation-only (no CI). Pull requests and
 manual dispatch run `.github/workflows/ci.yml` (fmt, clippy, tests,
