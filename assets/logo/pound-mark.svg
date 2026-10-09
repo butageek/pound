@@ -1,14 +1,8 @@
 <svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Pound mark">
-  <!-- strokes use currentColor: set CSS `color` to fit the host design;
-       the source half is the same color at reduced opacity -->
-  <g fill="currentColor">
-    <rect x="85" y="62" width="22" height="132" rx="11"/>
-    <rect x="62" y="90" width="59" height="20" rx="10"/>
-    <rect x="62" y="146" width="59" height="20" rx="10"/>
-  </g>
-  <g fill="currentColor" opacity="0.45">
-    <rect x="149" y="62" width="22" height="132" rx="11"/>
-    <rect x="135" y="90" width="59" height="20" rx="10"/>
-    <rect x="135" y="146" width="59" height="20" rx="10"/>
+  <g>
+    <rect x="85" y="62" width="22" height="132" rx="11" fill="#46C08A"/>
+    <rect x="149" y="62" width="22" height="132" rx="11" fill="#F0806F"/>
+    <rect x="62" y="90" width="132" height="20" rx="10" fill="#58A6FF"/>
+    <rect x="62" y="146" width="132" height="20" rx="10" fill="#E3B341"/>
   </g>
 </svg>

@@ -6,16 +6,10 @@
     </linearGradient>
   </defs>
   <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#bg)"/>
-  <!-- rendered pane: left of the divider -->
-  <g fill="#F5F8FD">
-    <rect x="85" y="62" width="22" height="132" rx="11"/>
-    <rect x="62" y="90" width="59" height="20" rx="10"/>
-    <rect x="62" y="146" width="59" height="20" rx="10"/>
-  </g>
-  <!-- source pane: right of the divider -->
-  <g fill="#7E88A0">
-    <rect x="149" y="62" width="22" height="132" rx="11"/>
-    <rect x="135" y="90" width="59" height="20" rx="10"/>
-    <rect x="135" y="146" width="59" height="20" rx="10"/>
+  <g>
+    <rect x="85" y="62" width="22" height="132" rx="11" fill="#46C08A"/>
+    <rect x="149" y="62" width="22" height="132" rx="11" fill="#F0806F"/>
+    <rect x="62" y="90" width="132" height="20" rx="10" fill="#58A6FF"/>
+    <rect x="62" y="146" width="132" height="20" rx="10" fill="#E3B341"/>
   </g>
 </svg>
