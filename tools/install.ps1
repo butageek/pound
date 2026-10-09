@@ -42,7 +42,10 @@ param(
     [switch]$NoRegister,
 
     # Do not add the install dir to the user PATH.
-    [switch]$NoPath
+    [switch]$NoPath,
+
+    # Relaunch Pound after installing (used by the in-app updater).
+    [switch]$Relaunch
 )
 
 $ErrorActionPreference = 'Stop'
@@ -265,4 +268,9 @@ if ($NoPath) {
 }
 else {
     Write-Host 'Open a new terminal and try:  pound README.md'
+}
+
+if ($Relaunch) {
+    Write-Step 'Relaunching Pound'
+    Start-Process -FilePath $targetExe
 }

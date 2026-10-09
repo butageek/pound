@@ -17,6 +17,7 @@
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tao::dpi::LogicalSize;
@@ -26,6 +27,7 @@ use tao::window::WindowBuilder;
 use wry::{http, WebView, WebViewBuilder, WebViewBuilderExtWindows};
 
 use crate::presenter::Presenter;
+use crate::update;
 
 /// How often to check the document for on-disk changes.
 const POLL_INTERVAL: Duration = Duration::from_millis(800);
@@ -45,6 +47,28 @@ pub fn run(file: Option<PathBuf>) {
     // Set when a push must refresh only the preview (edits/save acks):
     // rewriting the textarea would destroy the caret and scroll position.
     let preview = Rc::new(Cell::new(false));
+    // Set when the user confirmed an exit (ipc handlers run inside WebView2
+    // message dispatch and cannot touch ControlFlow themselves).
+    let exit = Rc::new(Cell::new(false));
+    // "Update & restart" with unsaved edits: show the close prompt first
+    // and run the installer when the exit actually goes through.
+    let update_on_exit = Rc::new(Cell::new(false));
+    // Set by ipc when the shell must show the close prompt (the handler
+    // cannot reach the webview directly).
+    let show_close_prompt = Rc::new(Cell::new(false));
+
+    // Background update check on start: a thread asks the GitHub API and
+    // drops the latest tag here (None = no result); the event loop picks
+    // it up on its next 800ms wake and shows the toast if it is newer.
+    let update_check = Arc::new(Mutex::new(None::<Option<String>>));
+    {
+        let slot = update_check.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(1)); // let startup settle
+            let tag = update::latest_release_tag();
+            *slot.lock().unwrap() = Some(tag);
+        });
+    }
 
     let builder = WebViewBuilder::new()
         .with_html(SHELL_HTML)
@@ -63,21 +87,58 @@ pub fn run(file: Option<PathBuf>) {
     // (wry ignores script exceptions). The shell therefore posts `ready`
     // once its scripts have parsed (see SHELL_HTML) and we re-push then.
     //
-    // The same channel carries editor traffic (strings only, framed by
-    // the first newline so the source text needs no escaping):
-    //   "ready"      shell parsed, push the document
-    //   "save"       Ctrl+S / Save button
-    //   "edit\n<text>"  the (debounced) editor buffer changed
+    //   "ready"          shell parsed, push the document
+    //   "save"           Ctrl+S / Save button
+    //   "save-and-exit"  the close prompt's Save: save, then exit
+    //   "exit"           the close prompt's Don't save: exit now
+    //   "update"         the update toast's Update & restart
+    //   "cancel-exit"    the close prompt's Cancel (clears pending update)
+    //   "edit\n<text>"   the (debounced) editor buffer changed
     let ipc_presenter = shared.clone();
     let ipc_dirty = dirty.clone();
     let ipc_preview = preview.clone();
+    let ipc_exit = exit.clone();
+    let ipc_update_on_exit = update_on_exit.clone();
+    let ipc_show_close_prompt = show_close_prompt.clone();
     let builder = builder.with_ipc_handler(move |request| {
         let body = request.body();
+        // Runs the installer if an update is pending; consumed once.
+        let install_if_pending = || {
+            if ipc_update_on_exit.replace(false) {
+                update::run_installer();
+            }
+        };
         if body == "ready" {
             ipc_dirty.set(true);
         } else if body == "save" {
             ipc_presenter.borrow_mut().save();
             ipc_preview.set(true);
+        } else if body == "save-and-exit" {
+            let mut presenter = ipc_presenter.borrow_mut();
+            presenter.save();
+            let saved = !presenter.model.dirty;
+            drop(presenter);
+            if saved {
+                install_if_pending();
+                ipc_exit.set(true);
+            } else {
+                // The save failed (banner shows why): stay open.
+                ipc_preview.set(true);
+            }
+        } else if body == "exit" {
+            install_if_pending();
+            ipc_exit.set(true);
+        } else if body == "update" {
+            if ipc_presenter.borrow().model.dirty {
+                // Reuse the close prompt: save or discard, then update.
+                ipc_update_on_exit.set(true);
+                ipc_show_close_prompt.set(true);
+            } else {
+                update::run_installer();
+                ipc_exit.set(true);
+            }
+        } else if body == "cancel-exit" {
+            ipc_update_on_exit.set(false);
         } else if let Some(text) = body.strip_prefix("edit\n") {
             ipc_presenter.borrow_mut().edit_source(text);
             ipc_preview.set(true);
@@ -106,7 +167,15 @@ pub fn run(file: Option<PathBuf>) {
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
-            } => *control_flow = ControlFlow::Exit,
+            } => {
+                // Unsaved edits: ask before quitting (the shell's dialog
+                // posts save-and-exit/exit; cancel just closes it).
+                if shared.borrow().model.dirty {
+                    eval_script(&webview, "pound.setClosePrompt(true);".to_owned());
+                } else {
+                    *control_flow = ControlFlow::Exit;
+                }
+            }
 
             Event::WindowEvent {
                 event: WindowEvent::DroppedFile(path),
@@ -117,6 +186,23 @@ pub fn run(file: Option<PathBuf>) {
             }
 
             Event::MainEventsCleared => {
+                if exit.get() {
+                    *control_flow = ControlFlow::Exit;
+                }
+                if show_close_prompt.replace(false) {
+                    eval_script(&webview, "pound.setClosePrompt(true);".to_owned());
+                }
+                // One-shot: show the update toast when a newer release was
+                // found by the background check.
+                if let Some(tag) = update_check
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .flatten()
+                    .filter(|tag| update::is_newer(tag, env!("CARGO_PKG_VERSION")))
+                {
+                    eval_script(&webview, format!("pound.setUpdate({});", json_str(&tag)));
+                }
                 if last_poll.elapsed() >= POLL_INTERVAL {
                     last_poll = Instant::now();
                     shared.borrow_mut().reload_if_changed();
@@ -280,26 +366,27 @@ fn push_rendered(webview: &WebView, presenter: &Presenter) {
     );
 }
 
-/// Status-bar text for the open document: file type, character and line
-/// counts plus the edit state, e.g. `Markdown · 1,234 characters · 56
-/// lines · edited`.
+/// Status-bar text: file type, character and line counts, the edit
+/// state, and the app version — e.g. `Markdown · 1,234 characters · 56
+/// lines · edited · v0.4.0`.
 fn status_text(presenter: &Presenter) -> String {
-    let Some(doc) = &presenter.model.document else {
-        return String::new();
-    };
-    let mut status = format!(
-        "{} · {} characters · {} lines",
-        doc.type_label(),
-        group_digits(doc.source.chars().count()),
-        group_digits(doc.source.lines().count()),
-    );
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(doc) = &presenter.model.document {
+        parts.push(format!(
+            "{} · {} characters · {} lines",
+            doc.type_label(),
+            group_digits(doc.source.chars().count()),
+            group_digits(doc.source.lines().count())
+        ));
+    }
     if presenter.model.dirty {
-        status.push_str(" · edited");
+        parts.push("edited".to_owned());
     }
     if presenter.model.stale {
-        status.push_str(" · changed on disk");
+        parts.push("changed on disk".to_owned());
     }
-    status
+    parts.push(format!("v{}", env!("CARGO_PKG_VERSION")));
+    parts.join(" · ")
 }
 
 /// Group digits in threes (1234567 -> 1,234,567).
@@ -416,6 +503,48 @@ const SHELL_HTML: &str = r#"<!doctype html>
   }
   #ctx-copy:hover { background: var(--hover); }
 
+  /* ---- close prompt (unsaved changes) ---- */
+  #close-prompt {
+    display: none; position: fixed; inset: 0; z-index: 30;
+    align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.35);
+  }
+  #close-prompt .dialog {
+    min-width: 320px; max-width: 440px; padding: 18px 20px 16px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,0.3);
+  }
+  #close-prompt .dialog-title { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
+  #close-prompt .dialog-body {
+    font-size: 13px; color: var(--muted); margin-bottom: 16px;
+    overflow-wrap: anywhere;
+  }
+  #close-prompt .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+  /* Buttons shared by the close prompt and the update toast. */
+  #close-prompt button, #update button {
+    font: 13px "Segoe UI", system-ui, sans-serif; color: var(--text);
+    background: transparent; border: 1px solid var(--border); border-radius: 6px;
+    padding: 5px 14px; cursor: pointer;
+  }
+  #close-prompt button:hover, #update button:hover { background: var(--hover); }
+  #close-prompt button.primary, #update button.primary {
+    background: var(--link); border-color: var(--link); color: #fff;
+  }
+  #close-prompt button.primary:hover, #update button.primary:hover {
+    background: var(--link); filter: brightness(1.12);
+  }
+
+  /* ---- update toast ---- */
+  #update {
+    display: none; position: fixed; right: 12px; bottom: 38px; z-index: 25;
+    align-items: center; gap: 12px; max-width: 460px; padding: 10px 14px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.2); font-size: 13px;
+  }
+  #update a { color: var(--link); text-decoration: none; }
+  #update a:hover { text-decoration: underline; }
+
   /* ---- error banner ---- */
   #error {
     display: none; align-items: center; gap: 10px;
@@ -463,7 +592,7 @@ const SHELL_HTML: &str = r#"<!doctype html>
     position: fixed; inset: auto 0 0 0; height: 26px; z-index: 10;
     display: flex; align-items: center; gap: 14px; padding: 0 12px;
     background: var(--bg); border-top: 1px solid var(--border);
-    color: var(--muted); font-size: 12px;
+    color: var(--muted); font-size: 12px; user-select: none;
   }
   #status-path {
     flex: 1 1 auto; min-width: 0;
@@ -564,6 +693,23 @@ const SHELL_HTML: &str = r#"<!doctype html>
     <span id="status-info"></span>
   </div>
   <div id="ctx-menu"><button id="ctx-copy" type="button">Copy <kbd>Ctrl+C</kbd></button></div>
+  <div id="update">
+    <span>Pound <b id="update-version"></b> is available.</span>
+    <a id="update-notes" href="">What's new</a>
+    <button id="update-now" class="primary" type="button">Update &amp; restart</button>
+    <button id="update-dismiss" type="button">Later</button>
+  </div>
+  <div id="close-prompt">
+    <div class="dialog">
+      <div class="dialog-title">Save changes?</div>
+      <div class="dialog-body" id="close-prompt-body"></div>
+      <div class="dialog-actions">
+        <button id="close-cancel" type="button">Cancel</button>
+        <button id="close-discard" type="button">Don't save</button>
+        <button id="close-save" class="primary" type="button">Save</button>
+      </div>
+    </div>
+  </div>
 <script>
   window.pound = {
     setContent(html, source, title, path, status, edited) {
@@ -602,6 +748,30 @@ const SHELL_HTML: &str = r#"<!doctype html>
       const el = document.getElementById('error');
       el.style.display = msg ? 'flex' : 'none';
       el.querySelector('span').textContent = msg || '';
+    },
+    // Shown by the host when the window is closed with unsaved edits.
+    // The buttons answer over ipc: Save -> "save-and-exit" (the host only
+    // exits if the save succeeded), Don't save -> "exit", Cancel ->
+    // "cancel-exit" (clears a pending update; the host keeps running).
+    setClosePrompt(show) {
+      const prompt = document.getElementById('close-prompt');
+      if (!show) { prompt.style.display = 'none'; return; }
+      const path = document.getElementById('status-path').textContent;
+      const name = path.split(/[\\/]/).filter(Boolean).pop() || 'This document';
+      document.getElementById('close-prompt-body').textContent =
+        name + ' has unsaved changes. Save before closing?';
+      prompt.style.display = 'flex';
+      document.getElementById('close-save').focus();
+    },
+    // Shown once when the start-up check found a newer GitHub release.
+    // "Update & restart" runs the official installer (the app exits, the
+    // installer replaces the exe and relaunches it); the notes link opens
+    // externally like every other web link.
+    setUpdate(version) {
+      document.getElementById('update-version').textContent = version;
+      document.getElementById('update-notes').href =
+        'https://github.com/butageek/pound/releases/tag/' + encodeURIComponent(version);
+      document.getElementById('update').style.display = 'flex';
     },
   };
 
@@ -778,6 +948,31 @@ const SHELL_HTML: &str = r#"<!doctype html>
   addEventListener('blur', hideCtxMenu);
   addEventListener('scroll', hideCtxMenu, true); // scrolling any pane would leave the menu stale
   addEventListener('keydown', e => { if (e.key === 'Escape') hideCtxMenu(); });
+
+  // ---- unsaved-changes prompt ----------------------------------------
+  const closePrompt = document.getElementById('close-prompt');
+  const hideClosePrompt = () => (closePrompt.style.display = 'none');
+  const answerClosePrompt = msg => {
+    hideClosePrompt();
+    hostSend(msg);
+  };
+  document.getElementById('close-save').onclick = () => answerClosePrompt('save-and-exit');
+  document.getElementById('close-discard').onclick = () => answerClosePrompt('exit');
+  document.getElementById('close-cancel').onclick = () => answerClosePrompt('cancel-exit');
+  addEventListener('keydown', e => {
+    if (closePrompt.style.display !== 'flex') return;
+    if (e.key === 'Escape') { e.preventDefault(); answerClosePrompt('cancel-exit'); }
+    if (e.key === 'Enter') { e.preventDefault(); answerClosePrompt('save-and-exit'); }
+  });
+
+  // ---- update toast ---------------------------------------------------
+  const updateToast = document.getElementById('update');
+  document.getElementById('update-now').onclick = () => {
+    updateToast.style.display = 'none';
+    hostSend('update');
+  };
+  document.getElementById('update-dismiss').onclick = () =>
+    (updateToast.style.display = 'none');
 
   // Tell the host this shell has parsed and pound.setContent is callable:
   // the initial content push races the page load, so the host re-sends on

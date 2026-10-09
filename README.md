@@ -74,6 +74,10 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
   protocol), links open in your browser, code blocks have copy buttons.
 - Auto-reloads when the file changes on disk — keeping your reading
   position.
+- **Self-updates** — checks GitHub on start and offers **Update &
+  restart**, which runs the official installer in place (replaces the exe,
+  keeps your registration) and relaunches. The status bar always shows
+  the running version.
 - Installs per-user — **no admin rights required**.
 - Registers in the Windows app list (`RegisteredApplications` + ProgId) so
   other apps and the "Open with" / "Default apps" dialogs can find it.

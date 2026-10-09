@@ -95,6 +95,13 @@ file types (CSV next). Architecture is strict MVP
   shows `edited`, plus `changed on disk` when the file was modified
   externally (saving resolves it, last writer wins); a same-content mtime
   touch never reloads. The window title prefixes `*` while unsaved.
+- Closing with unsaved changes: `CloseRequested` shows the shell's
+  dialog via `pound.setClosePrompt(true)` instead of exiting. Its buttons
+  post `save-and-exit` (the host saves first and only exits when the
+  buffer is clean — a failed save keeps the app open with the banner) or
+  `exit`; Cancel posts `cancel-exit` to clear a pending update. The ipc
+  handlers set an `exit` flag (they run inside WebView2 message dispatch
+  and cannot touch `ControlFlow`) which `MainEventsCleared` honors.
 - Right-click: WebView2's default context menu (Chromium's Copy / Print /
   empty "More tools" submenu) is disabled via
   `with_default_context_menus(false)`; the shell shows a minimal Copy-only
@@ -147,6 +154,24 @@ powershell -ExecutionPolicy Bypass -File tools/install.ps1 -SetDefault  # on Win
 Everyday pushes to main are preservation-only (no CI). Pull requests and
 manual dispatch run `.github/workflows/ci.yml` (fmt, clippy, tests,
 Windows cross-check).
+
+## In-app updates
+
+- On start the view spawns a thread that asks the GitHub API for the latest
+  release tag (`src/update.rs` — one PowerShell `Invoke-RestMethod`, no
+  HTTP-client dependency; silent on failure) and shows a bottom-right toast
+  when newer. `is_newer` refuses anything unparseable (incl. prerelease
+  suffixes) so it can never nag about a bogus version.
+- The toast's **Update & restart** posts `update` over ipc. In-place
+  upgrade is possible exactly because the official installer already is
+  one: the app spawns `tools/install.ps1 -Relaunch` (CREATE_NO_WINDOW) and
+  exits; the installer closes any running Pound, replaces the exe,
+  re-registers and relaunches. Same trust path as the one-liner (HTTPS to
+  github.com). With unsaved edits the close prompt runs first — Save or
+  Don't save proceed to the installer, Cancel posts `cancel-exit` and
+  clears the pending update.
+- GOTCHA: both the check and the installer are silent PowerShell spawns;
+  a failed upgrade just leaves the old version running.
 
 ## Windows integration notes (context for `register.rs`)
 
