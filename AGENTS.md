@@ -24,7 +24,7 @@ that way:
 ## Environment
 
 - Development happens on Linux/WSL; the shipped binary is Windows. The GUI
-  (tao/wry/rfd) is `[target.'cfg(windows)'.dependencies]`-gated, so Linux
+  (tao/wry) is `[target.'cfg(windows)'.dependencies]`-gated, so Linux
   hosts run `cargo test` only and cannot open the GUI.
 - Windows type-checking needs the target: `rustup target add x86_64-pc-windows-msvc`
   (a plain `cargo check --target` needs no linker; the icon is only embedded
@@ -33,8 +33,8 @@ that way:
   VS Build Tools). NEVER build releases with windows-gnu/mingw: mingw cannot
   link Microsoft's static WebView2Loader lib, so the exe imports
   `WebView2Loader.dll` dynamically and dies at startup with
-  STATUS_DLL_NOT_FOUND (0xC0000135) on user machines — this shipped as
-  v0.2.0 and is why the release runner is MSVC.
+  STATUS_DLL_NOT_FOUND (0xC0000135) on user machines — an early release
+  shipped exactly this way, which is why the release runner is MSVC.
 - The logo & icon set — `assets/pound.ico` (16–256), `assets/pound.png`,
   and the SVG/PNG assets under `assets/logo/` — is regenerated with
   `python3 tools/gen_icon.py` (stdlib only; supersampled anti-aliasing).
@@ -79,7 +79,7 @@ that way:
 cargo test                                      # unit tests (headless)
 cargo fmt --all && cargo clippy --all-targets   # keep CI green
 cargo check --target x86_64-pc-windows-msvc     # type-check Windows code
-./scripts/package.sh                            # cross-build + dist/pound-<ver>-win64.zip
+./scripts/package.sh                            # build dist/pound-<ver>-win64.zip (MSVC host)
 powershell -ExecutionPolicy Bypass -File tools/install.ps1 -SetDefault  # on Windows
 ```
 
@@ -91,11 +91,13 @@ powershell -ExecutionPolicy Bypass -File tools/install.ps1 -SetDefault  # on Win
    ```bash
    git tag v0.X.Y && git push origin main --tags
    ```
-3. `.github/workflows/release.yml` runs the tests, cross-builds the zip
-   via mingw-w64 and publishes a GitHub Release with notes generated from
-   the commits since the previous tag. Users install with the one-liner in
-   the README (the installer fetches `pound-*-win64.zip` from the latest
-   release via the GitHub API).
+3. `.github/workflows/release.yml` runs the tests, builds the zip on a
+   windows-latest MSVC runner via `scripts/package.sh` (CRT and
+   WebView2Loader statically linked; an import-table check refuses to ship
+   exes needing non-system DLLs) and publishes a GitHub Release with notes
+   generated from the commits since the previous tag. Users install with the
+   one-liner in the README (the installer fetches `pound-*-win64.zip` from
+   the latest release via the GitHub API).
 
 Everyday pushes to main are preservation-only (no CI). Pull requests and
 manual dispatch run `.github/workflows/ci.yml` (fmt, clippy, tests,

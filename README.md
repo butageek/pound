@@ -135,7 +135,7 @@ MSVC toolchain (`x86_64-pc-windows-msvc`).
 cargo test                                         # unit tests (headless)
 cargo fmt --all && cargo clippy --all-targets      # keep CI green
 cargo check --target x86_64-pc-windows-msvc        # type-check Windows code from any OS
-./scripts/package.sh                               # cross-build + dist/pound-<ver>-win64.zip
+./scripts/package.sh                               # build dist/pound-<ver>-win64.zip (MSVC host)
 python3 tools/gen_icon.py                          # regenerate the logo & icon set (stdlib only)
 ```
 

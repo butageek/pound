@@ -8,8 +8,9 @@
 # Built on windows-latest with the MSVC toolchain: WebView2Loader is linked
 # STATICALLY on MSVC. The mingw (windows-gnu) cross-build imports
 # WebView2Loader.dll dynamically (mingw cannot link Microsoft's static lib),
-# which made v0.2.0 die at startup with STATUS_DLL_NOT_FOUND (0xC0000135)
-# on machines without the DLL next to the exe.
+# and the exe then dies at startup with STATUS_DLL_NOT_FOUND (0xC0000135)
+# on machines without the DLL next to the exe (this bit an early release
+# of the repo's pre-rewrite history).
 
 name: Release
 
