@@ -10,9 +10,9 @@
 
 **Repo:** [github.com/butageek/pound](https://github.com/butageek/pound) · Issues and PRs welcome.
 
-**Pound** is a small **markdown reader for Windows** written in Rust. It
-renders markdown out of the box and can show the raw source **side by side**
-with a single toggle.
+**Pound** is a lightweight **file viewer for Windows** written in Rust. It
+starts with markdown — rendered out of the box, with the raw source one
+toggle away — and is growing into more file types (CSV) and editing.
 
 > Working MVP: Windows 10/11. Development happens on Linux/WSL; see
 > [AGENTS.md](AGENTS.md) for the environment, build and release playbook
