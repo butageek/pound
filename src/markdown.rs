@@ -7,6 +7,9 @@
 //! - pulldown-cmark generates the HTML (tables, task lists, strikethrough…)
 //! - local image `src`s are rewritten to the `poundimg://` custom protocol,
 //!   served from disk by the view layer
+//! - every top-level block is wrapped in a `<div data-line-start
+//!   data-line-end>` carrying its source line range — the view's scroll
+//!   sync maps panes through them (VSCode-style)
 //! - the result is sanitized with ammonia: markdown files can contain raw
 //!   HTML, and file content must never execute in the reader
 
@@ -22,7 +25,19 @@ pub fn to_html(source: &str, base_dir: &Path) -> String {
     options.insert(Options::ENABLE_TASKLISTS);
     options.insert(Options::ENABLE_STRIKETHROUGH);
 
-    let parser = Parser::new_ext(source, options).map(|event| match event {
+    let events = Parser::new_ext(source, options)
+        .into_offset_iter()
+        .map(|(event, range)| (localize_image_event(event, base_dir), range));
+
+    let mut raw = String::new();
+    push_blocks(&mut raw, events, &line_start_offsets(source));
+    sanitize(&raw)
+}
+
+/// Rewrite local image `src`s to the `poundimg://` protocol; pass every
+/// other event through untouched.
+fn localize_image_event<'a>(event: Event<'a>, base_dir: &Path) -> Event<'a> {
+    match event {
         Event::Start(Tag::Image {
             link_type,
             dest_url,
@@ -38,11 +53,77 @@ pub fn to_html(source: &str, base_dir: &Path) -> String {
             })
         }
         other => other,
-    });
+    }
+}
 
-    let mut raw = String::new();
-    html::push_html(&mut raw, parser);
-    sanitize(&raw)
+/// Render the event stream as HTML, wrapping every top-level block in a
+/// div carrying its source line range (the view's scroll sync maps panes
+/// through these attributes).
+fn push_blocks<'a, I>(raw: &mut String, events: I, line_starts: &[usize])
+where
+    I: Iterator<Item = (Event<'a>, std::ops::Range<usize>)>,
+{
+    let mut depth = 0usize; // container nesting; 0 = between top-level blocks
+    let mut block: Vec<Event<'a>> = Vec::new();
+    let mut block_start = 0usize;
+    let mut block_end = 0usize;
+    for (event, range) in events {
+        match &event {
+            Event::Start(_) => {
+                if depth == 0 {
+                    block_start = range.start;
+                    block_end = range.end;
+                }
+                depth += 1;
+            }
+            Event::End(_) => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        block_end = block_end.max(range.end);
+        block.push(event);
+        if depth == 0 {
+            emit_block(raw, &mut block, line_starts, block_start, block_end);
+        }
+    }
+    // Unreachable for balanced streams (pulldown always pairs Start/End);
+    // kept so malformed input can never silently drop trailing content.
+    if !block.is_empty() {
+        emit_block(raw, &mut block, line_starts, block_start, block_end);
+    }
+}
+
+fn emit_block(
+    raw: &mut String,
+    block: &mut Vec<Event>,
+    line_starts: &[usize],
+    start: usize,
+    end: usize,
+) {
+    let first = line_of(line_starts, start);
+    let last = line_of(line_starts, end.saturating_sub(1).max(start));
+    raw.push_str(&format!(
+        r#"<div data-line-start="{first}" data-line-end="{last}">"#
+    ));
+    html::push_html(raw, block.drain(..));
+    raw.push_str("</div>");
+}
+
+/// Byte offset where each 1-based line starts (line 1 = offset 0).
+fn line_start_offsets(source: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    starts.extend(
+        source
+            .bytes()
+            .enumerate()
+            .filter(|(_, b)| *b == b'\n')
+            .map(|(i, _)| i + 1),
+    );
+    starts
+}
+
+/// 1-based number of the line containing byte offset `byte`.
+fn line_of(starts: &[usize], byte: usize) -> usize {
+    starts.partition_point(|&s| s <= byte)
 }
 
 /// Rewrite relative image URLs to `poundimg://<absolute path>`; leave
@@ -180,6 +261,10 @@ fn sanitize(raw: &str) -> String {
     ammonia::Builder::new()
         .tags(tags)
         .add_tag_attributes("input", ["type", "checked", "disabled"])
+        // Ours: block line annotations for scroll sync (numbers only, read
+        // back by the shell — inert even if a file ships its own data-*
+        // attributes, since scripts never execute).
+        .add_generic_attribute_prefixes(["data-"])
         // pulldown leaves remote images as-is and we rewrite local ones to
         // poundimg:// — both must survive the sanitizer's URL filter.
         .add_url_schemes(["poundimg", "data"])
@@ -204,6 +289,24 @@ mod tests {
         let html = to_html(&source, root);
         std::fs::write(std::env::temp_dir().join("pound-sample-content.html"), html).unwrap();
         std::fs::write(std::env::temp_dir().join("pound-sample-source.txt"), source).unwrap();
+    }
+
+    #[test]
+    fn blocks_carry_source_line_numbers() {
+        let source = "# Title\n\npara one\ncontinues\n\n```rust\nfn main() {}\n```\n";
+        let html = to_html(source, &dir());
+        assert!(
+            html.contains(r#"<div data-line-start="1" data-line-end="1"><h1>Title</h1>"#),
+            "html was: {html}"
+        );
+        assert!(
+            html.contains(r#"data-line-start="3" data-line-end="4""#),
+            "html was: {html}"
+        );
+        assert!(
+            html.contains(r#"data-line-start="6" data-line-end="8""#),
+            "html was: {html}"
+        );
     }
 
     #[test]

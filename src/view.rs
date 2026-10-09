@@ -528,7 +528,11 @@ const SHELL_HTML: &str = r#"<!doctype html>
   document.getElementById('dismiss').onclick = () => (location.href = 'pound://dismiss-error');
 
   const toggle = document.getElementById('source-toggle');
-  const applySplit = () => document.body.classList.toggle('split', toggle.checked);
+  const applySplit = () => {
+    document.body.classList.toggle('split', toggle.checked);
+    // Opening the source pane aligns it with what's on screen (VSCode-style).
+    if (toggle.checked) syncSourceFromContent();
+  };
   toggle.onchange = applySplit;
 
   addEventListener('keydown', e => {
@@ -538,6 +542,67 @@ const SHELL_HTML: &str = r#"<!doctype html>
       applySplit();
     }
   });
+
+  // ---- scroll sync (VSCode-style) ----------------------------------
+  // The renderer wraps each top-level block in a div carrying its source
+  // line range (data-line-start/-end). Scrolling either pane scrolls the
+  // other to the matching position, interpolated proportionally within a
+  // block. Programmatic sets stamp a short per-pane suppression window so
+  // the echo of our own scrolling never re-triggers the sync.
+  const contentWrap = document.getElementById('content-wrap');
+  const sourceWrap = document.getElementById('source-wrap');
+  const sourceEl = document.getElementById('source');
+  const suppressEchoUntil = { source: 0, content: 0 };
+  const setScrollTop = (which, el, y) => {
+    suppressEchoUntil[which] = Date.now() + 250;
+    el.scrollTop = Math.max(0, y);
+  };
+  const blocksWithLines = () =>
+    [...document.querySelectorAll('#content > [data-line-start]')].map(el => {
+      const s = +el.dataset.lineStart;
+      return { el, s, e: Math.max(+el.dataset.lineEnd, s + 1) };
+    });
+  // The source pane is plain <pre> text: a fixed line height and top
+  // padding turn a scroll offset into a (fractional) line number and back.
+  const sourceMetrics = () => {
+    const cs = getComputedStyle(sourceEl);
+    return { lh: parseFloat(cs.lineHeight) || 20, pad: parseFloat(cs.paddingTop) || 0 };
+  };
+  const blockTop = (el, scrollTop) =>
+    el.getBoundingClientRect().top - contentWrap.getBoundingClientRect().top + scrollTop;
+
+  function syncContentFromSource() {
+    if (!document.body.classList.contains('split')) return;
+    const blocks = blocksWithLines();
+    if (!blocks.length) return;
+    const { lh, pad } = sourceMetrics();
+    const line = 1 + (sourceWrap.scrollTop - pad) / lh;
+    let t = blocks[0];
+    for (const b of blocks) { if (b.s <= line) t = b; else break; }
+    const frac = Math.min(Math.max((line - t.s) / (t.e - t.s), 0), 1);
+    setScrollTop('content', contentWrap, blockTop(t.el, contentWrap.scrollTop) + frac * t.el.offsetHeight);
+  }
+
+  function syncSourceFromContent() {
+    if (!document.body.classList.contains('split')) return;
+    const blocks = blocksWithLines();
+    if (!blocks.length) return;
+    const viewY = contentWrap.scrollTop;
+    let t = blocks[0];
+    for (const b of blocks) { if (blockTop(b.el, viewY) <= viewY) t = b; else break; }
+    const top = blockTop(t.el, viewY);
+    const frac = Math.min(Math.max((viewY - top) / Math.max(t.el.offsetHeight, 1), 0), 1);
+    const line = t.s + frac * (t.e - t.s);
+    const { lh, pad } = sourceMetrics();
+    setScrollTop('source', sourceWrap, pad + (line - 1) * lh);
+  }
+
+  sourceWrap.addEventListener('scroll', () => {
+    if (Date.now() >= suppressEchoUntil.source) syncContentFromSource();
+  }, { passive: true });
+  contentWrap.addEventListener('scroll', () => {
+    if (Date.now() >= suppressEchoUntil.content) syncSourceFromContent();
+  }, { passive: true });
 
   // Tell the host this shell has parsed and pound.setContent is callable:
   // the initial content push races the page load, so the host re-sends on

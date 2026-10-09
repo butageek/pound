@@ -72,6 +72,15 @@ that way:
 - Local images: `markdown.rs` rewrites relative srcs to percent-encoded
   `poundimg://<abs path>`; the view serves them from disk via a custom
   protocol. Unknown/missing files keep their src (broken-image marker).
+- Scroll sync (VSCode-style): `markdown.rs` wraps every top-level block
+  in a `<div data-line-start data-line-end>` (byte ranges from pulldown's
+  offset iter, binary-searched to 1-based line numbers). The shell maps
+  each pane's scroll position to the matching line/block of the other,
+  interpolating within a block; programmatic sets stamp a short per-pane
+  echo-suppression window so the panes never ping-pong. `data-` survives
+  ammonia via a generic attribute prefix (inert — scripts are stripped),
+  and only direct children of `#content` count as sync anchors, so a
+  file's raw HTML can't forge them.
 - **ammonia sanitizes all HTML** — markdown files can embed raw HTML and
   file content must never execute (scripts/handlers/styling stripped).
   `poundimg`/`data` URL schemes must be in ammonia's allowlist or image

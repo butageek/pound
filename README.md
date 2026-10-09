@@ -61,6 +61,8 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
   command line (`pound file.md`).
 - **Rendered view by default**, with a **Source toggle** that opens a
   side-by-side panel showing the raw markdown. Shortcut: `Ctrl+U`.
+- **Synced scrolling** — in split view, scrolling either pane scrolls the
+  other to the matching position (VSCode-style).
 - **Status bar**: full path of the open file plus its type, character and
   line counts.
 - Full CommonMark via pulldown-cmark: tables, task lists, strikethrough,
@@ -100,7 +102,8 @@ into HTML+CSS instead of being hand-laid-out by the GUI toolkit.
   `pound file.md`, or drag a file onto the window.
 - The document renders immediately.
 - Click **Source** (top right) or press `Ctrl+U` to toggle the side-by-side
-  raw markdown panel.
+  raw markdown panel. In split view, scrolling either pane scrolls the
+  other to the matching position.
 - Code blocks have a **Copy** button; links open in your default browser.
 - Saving the file in another editor updates the view automatically.
 
@@ -187,7 +190,6 @@ editor for more file types.
 - [ ] Markdown editing (edit in place, save back to disk)
 - [ ] More file types: CSV/TSV tables first, then plain text and beyond
 - [ ] Syntax highlighting for the source pane
-- [ ] Scroll sync between rendered and source panels
 - [ ] Table of contents sidebar; footnotes; remote images
 - [ ] winget manifest once the release has some real-world use
 
