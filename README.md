@@ -20,10 +20,12 @@ toggle away — and is growing into more file types (CSV) and editing.
 
 ## Install (Windows, no admin rights)
 
-Open PowerShell and paste:
+Open PowerShell and paste (downloads the installer and runs it as a
+file — piping scripts into `iex` breaks on Windows PowerShell 5.1 when
+they declare parameters):
 
 ```powershell
-powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/install.ps1 | iex"
+powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/install.ps1 -OutFile $env:TEMP\pound-install.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\pound-install.ps1"
 ```
 
 This downloads the latest release build from GitHub, copies it to
@@ -48,7 +50,7 @@ Grab `pound-<version>-win64.zip` and follow the bundled `QUICK-START.txt`.
 Uninstall:
 
 ```powershell
-powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/uninstall.ps1 | iex"
+powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/uninstall.ps1 -OutFile $env:TEMP\pound-uninstall.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\pound-uninstall.ps1"
 ```
 
 ## Features

@@ -7,9 +7,12 @@ side-by-side pane. No admin rights needed anywhere.
 
 1. RUN THE INSTALLER (recommended)
 
-   Open PowerShell and paste:
+   Open PowerShell and paste (irm + iex on one line, then the installer
+   line — piping scripts into iex breaks on Windows PowerShell 5.1 when
+   they declare parameters, so run the downloaded file instead):
 
-     irm https://raw.githubusercontent.com/butageek/pound/main/tools/install.ps1 | iex
+     irm https://raw.githubusercontent.com/butageek/pound/main/tools/install.ps1 -OutFile $env:TEMP\pound-install.ps1
+     powershell -ExecutionPolicy Bypass -File $env:TEMP\pound-install.ps1
 
    This installs Pound, registers it with Windows and adds it to your PATH.
    To also make it the default app for .md files, download and run it with

@@ -1,7 +1,9 @@
 # Pound installer (per-user, no admin rights required).
 #
-# Easiest install (downloads the latest release build from GitHub):
-#   powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/install.ps1 | iex"
+# Easiest install (downloads the latest release build from GitHub; run as
+# a file — piping this script into iex breaks on Windows PowerShell 5.1
+# because of the param block below):
+#   powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/install.ps1 -OutFile $env:TEMP\pound-install.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\pound-install.ps1"
 #
 # More control:
 #   powershell -ExecutionPolicy Bypass -File tools\install.ps1 -SetDefault
