@@ -61,6 +61,12 @@ file types (CSV next). Architecture is strict MVP
   intents. There is deliberately no Open/Reload UI: files arrive by
   double-click, drag-and-drop or CLI, and on-disk edits auto-reload.
   http(s)/mailto links are opened externally and never navigate the reader.
+- Drag & drop only reaches the host when a wry `with_drag_drop_handler`
+  is registered — that's what makes wry set `AllowExternalDrop(false)`;
+  without it the WebView2 page silently swallows drops (tao's
+  `DroppedFile` never fires, the webview covers the whole client area).
+  The handler routes `DragDropEvent::Drop` paths into
+  `presenter.open_dropped`; the return value is ignored on Windows.
 - Startup handshake: `evaluate_script` right after `build` races
   WebView2's `NavigateToString` commit — a warm-started second instance
   regularly loses (the script runs in the still-blank document where
@@ -118,8 +124,15 @@ file types (CSV next). Architecture is strict MVP
   and cannot touch `ControlFlow`) which `MainEventsCleared` honors.
 - Right-click: WebView2's default context menu (Chromium's Copy / Print /
   empty "More tools" submenu) is disabled via
-  `with_default_context_menus(false)`; the shell shows a minimal Copy-only
-  menu when text is selected instead.
+  `with_default_context_menus(false)`. In the source editor the shell's
+  menu offers Cut / Copy / Paste / Select All (Cut/Copy disabled without
+  a selection); anywhere else it stays Copy-only for selections.
+  Cut/insert go through `execCommand` so they stay on the editor's
+  native undo stack and fire the normal input→edit round-trip. Paste is
+  host-mediated — WebView2 cannot read the clipboard from JS without a
+  permission prompt — via `clipboard-read` ipc and a Win32
+  `CF_UNICODETEXT` read (`clipboard.rs`), answered with
+  `pound.setClipboardText`, which inserts at the caret like typing.
 - **ammonia sanitizes all HTML** — markdown files can embed raw HTML and
   file content must never execute (scripts/handlers/styling stripped).
   `poundimg`/`data` URL schemes must be in ammonia's allowlist or image

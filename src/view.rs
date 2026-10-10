@@ -24,13 +24,12 @@ use tao::dpi::LogicalSize;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoop};
 use tao::window::WindowBuilder;
-use wry::{http, WebView, WebViewBuilder, WebViewBuilderExtWindows};
+use wry::{http, DragDropEvent, WebView, WebViewBuilder, WebViewBuilderExtWindows};
 
 use crate::presenter::Presenter;
 use crate::register;
 use crate::theme::{DarkPalette, LightPalette, Settings, Theme};
 use crate::update;
-
 /// The shell with the persisted settings injected
 /// (`window.poundSettings`): the head script resolves the theme before
 /// first paint, so the app never flashes the wrong one.
@@ -78,6 +77,9 @@ pub fn run(file: Option<PathBuf>) {
     // The running installer's streamed progress (see update::InstallerRun).
     // Shared with the ipc handler, which spawns it.
     let installer: Arc<update::InstallerSlot> = Arc::new(Mutex::new(None));
+    // Clipboard text awaiting delivery to the shell (the Paste action:
+    // the ipc handler cannot evaluate scripts, so the loop sends it).
+    let clipboard_reply: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
     // Background update check on start: a thread asks the GitHub API and
     // drops the latest tag here (None = no result); the event loop picks
@@ -117,6 +119,8 @@ pub fn run(file: Option<PathBuf>) {
     //   "cancel-exit"    the close prompt's Cancel (clears pending update)
     //   "setting\n<n> <v>" a settings-page change: validated, persisted;
     //                     the shell already applied it locally
+    //   "clipboard-read" the editor's Paste: host reads the Win32
+    //                     clipboard, replies via pound.setClipboardText
     //   "edit\n<text>"   the (debounced) editor buffer changed
     let ipc_presenter = shared.clone();
     let ipc_dirty = dirty.clone();
@@ -126,6 +130,7 @@ pub fn run(file: Option<PathBuf>) {
     let ipc_show_close_prompt = show_close_prompt.clone();
     let ipc_update_ui = show_update_progress.clone();
     let ipc_installer = Arc::clone(&installer);
+    let ipc_clipboard_reply = Arc::clone(&clipboard_reply);
     let builder = builder.with_ipc_handler(move |request| {
         let body = request.body();
         // Spawn the installer and switch the toast to progress mode. The
@@ -214,10 +219,29 @@ pub fn run(file: Option<PathBuf>) {
                     register::save_setting(reg_name, value);
                 }
             }
+        } else if body == "clipboard-read" {
+            // A non-text clipboard simply yields no reply: Paste no-ops.
+            if let Some(text) = crate::clipboard::read_text() {
+                *ipc_clipboard_reply.lock().unwrap() = Some(text);
+            }
         } else if let Some(text) = body.strip_prefix("edit\n") {
             ipc_presenter.borrow_mut().edit_source(text);
             ipc_preview.set(true);
         }
+    });
+    // File drops: WebView2 forwards them to the host only when a
+    // drag-drop handler is registered (wry sets AllowExternalDrop(false)
+    // and installs its own controller) — without one, the page silently
+    // swallows them and tao's DroppedFile never fires because the webview
+    // covers the whole client area.
+    let drop_presenter = shared.clone();
+    let drop_dirty = dirty.clone();
+    let builder = builder.with_drag_drop_handler(move |event| {
+        if let DragDropEvent::Drop { paths, .. } = event {
+            drop_presenter.borrow_mut().open_dropped(&paths);
+            drop_dirty.set(true);
+        }
+        true
     });
     let webview = builder
         .with_navigation_handler(move |url| {
@@ -259,20 +283,19 @@ pub fn run(file: Option<PathBuf>) {
                 }
             }
 
-            Event::WindowEvent {
-                event: WindowEvent::DroppedFile(path),
-                ..
-            } => {
-                shared.borrow_mut().open_dropped(&[path]);
-                dirty.set(true);
-            }
-
             Event::MainEventsCleared => {
                 if exit.get() {
                     *control_flow = ControlFlow::Exit;
                 }
                 if show_close_prompt.replace(false) {
                     eval_script(&webview, "pound.setClosePrompt(true);".to_owned());
+                }
+                // Deliver clipboard text requested by the editor's Paste.
+                if let Some(text) = clipboard_reply.lock().unwrap().take() {
+                    eval_script(
+                        &webview,
+                        format!("pound.setClipboardText({});", json_str(&text)),
+                    );
                 }
                 // Update progress: switch the toast to progress mode once,
                 // then mirror the installer's latest line until it exits.
@@ -625,14 +648,14 @@ const SHELL_HTML: &str = r#"<!doctype html>
     box-shadow: 0 6px 20px rgba(0,0,0,0.18);
   }
   #ctx-menu.show { display: block; }
-  #ctx-copy {
+  #ctx-menu button {
     display: flex; width: 100%; align-items: center; justify-content: space-between;
     font: 13px "Segoe UI", system-ui, sans-serif; color: var(--text);
     background: transparent; border: 0; border-radius: 5px; padding: 6px 10px; cursor: pointer;
   }
-  #ctx-copy:hover { background: var(--hover); }
+  #ctx-menu button:disabled { color: var(--muted); cursor: default; }
+  #ctx-menu button:hover:not(:disabled) { background: var(--hover); }
 
-  /* ---- close prompt (unsaved changes) ---- */
   /* ---- dialogs (close prompt, settings) ---- */
   #close-prompt, #settings {
     display: none; position: fixed; inset: 0; z-index: 30;
@@ -868,7 +891,12 @@ const SHELL_HTML: &str = r#"<!doctype html>
     <span id="status-path"></span>
     <span id="status-info"></span>
   </div>
-  <div id="ctx-menu"><button id="ctx-copy" type="button">Copy <kbd>Ctrl+C</kbd></button></div>
+  <div id="ctx-menu">
+    <button id="ctx-cut" type="button">Cut <kbd>Ctrl+X</kbd></button>
+    <button id="ctx-copy" type="button">Copy <kbd>Ctrl+C</kbd></button>
+    <button id="ctx-paste" type="button">Paste <kbd>Ctrl+V</kbd></button>
+    <button id="ctx-selectall" type="button">Select All <kbd>Ctrl+A</kbd></button>
+  </div>
   <div id="update">
     <div id="update-offer">
       <span>Pound <b id="update-version"></b> is available.</span>
@@ -996,6 +1024,14 @@ const SHELL_HTML: &str = r#"<!doctype html>
     setUpdatingProgress(line) {
       document.getElementById('update-progress-line').textContent =
         line.replace(/^===>\s*/, '');
+    },
+    // Host-side clipboard text (the editor's Paste action): insert at
+    // the caret like typing, so it lands on the native undo stack and
+    // fires the usual edit round-trip.
+    setClipboardText(text) {
+      if (!text) return;
+      sourceEl.focus();
+      document.execCommand('insertText', false, text);
     },
   };
 
@@ -1182,8 +1218,10 @@ const SHELL_HTML: &str = r#"<!doctype html>
   });
 
   // ---- context menu --------------------------------------------------
-  // Minimal replacement for the disabled WebView2 default menu: a lone
-  // Copy action, shown only when text is selected.
+  // Minimal replacement for the disabled WebView2 default menu. In the
+  // editor pane it offers the clipboard set (Cut/Copy/Paste/Select All,
+  // the clipboard-bound ones disabled without a selection); anywhere
+  // else it stays Copy-only, shown when something is selected.
   const ctxMenu = document.getElementById('ctx-menu');
   const hideCtxMenu = () => ctxMenu.classList.remove('show');
   // Selection text for Copy; the textarea too — form-control selections
@@ -1197,16 +1235,46 @@ const SHELL_HTML: &str = r#"<!doctype html>
     }
     return '';
   };
+  const ctxButton = id => document.getElementById(id);
   document.addEventListener('contextmenu', e => {
     e.preventDefault();
-    if (!selectedText().trim()) { hideCtxMenu(); return; }
+    const editor = e.target === sourceEl;
+    const hasSelection = selectedText().length > 0;
+    if (!editor && !hasSelection) { hideCtxMenu(); return; }
+    ['ctx-cut', 'ctx-paste', 'ctx-selectall'].forEach(id =>
+      (ctxButton(id).hidden = !editor));
+    ['ctx-cut', 'ctx-copy'].forEach(id =>
+      (ctxButton(id).disabled = !hasSelection));
     ctxMenu.classList.add('show');
     // Open at the cursor, nudged back inside the window if it would overflow.
     ctxMenu.style.left = Math.min(e.clientX, innerWidth - ctxMenu.offsetWidth - 4) + 'px';
     ctxMenu.style.top = Math.min(e.clientY, innerHeight - ctxMenu.offsetHeight - 4) + 'px';
   });
-  document.getElementById('ctx-copy').onclick = () => {
+  ctxButton('ctx-copy').onclick = () => {
     copyText(selectedText());
+    hideCtxMenu();
+  };
+  // execCommand keeps Cut on the native undo stack (and fires the input
+  // event, so the edit round-trip runs); the fallback covers browsers
+  // where it is unavailable.
+  ctxButton('ctx-cut').onclick = () => {
+    sourceEl.focus();
+    if (!document.execCommand('cut')) {
+      copyText(selectedText());
+      sourceEl.setRangeText('', sourceEl.selectionStart, sourceEl.selectionEnd, 'end');
+      hostSend('edit\n' + sourceEl.value);
+    }
+    hideCtxMenu();
+  };
+  // WebView2 cannot read the clipboard from JS: ask the host, which
+  // replies through pound.setClipboardText.
+  ctxButton('ctx-paste').onclick = () => {
+    hideCtxMenu();
+    hostSend('clipboard-read');
+  };
+  ctxButton('ctx-selectall').onclick = () => {
+    sourceEl.focus();
+    sourceEl.select();
     hideCtxMenu();
   };
   addEventListener('click', hideCtxMenu);

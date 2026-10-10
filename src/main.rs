@@ -13,6 +13,8 @@
 mod cli;
 // The GUI core is exercised by the Windows view and the test suite;
 // non-Windows hosts run the tests only.
+#[cfg(windows)]
+mod clipboard;
 #[cfg(any(windows, test))]
 mod markdown;
 #[cfg(any(windows, test))]
