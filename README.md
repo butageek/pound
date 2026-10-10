@@ -28,6 +28,14 @@ they declare parameters):
 powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/install.ps1 -OutFile $env:TEMP\pound-install.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\pound-install.ps1"
 ```
 
+Already in **PowerShell 7** (`pwsh`)? The short form works too — but note
+that wrapping it in `powershell -c …` would downgrade it to Windows
+PowerShell 5.1, where it fails:
+
+```powershell
+irm https://raw.githubusercontent.com/butageek/pound/main/tools/install.ps1 | iex
+```
+
 This downloads the latest release build from GitHub, copies it to
 `%LOCALAPPDATA%\Pound`, adds a Start Menu shortcut and your user `PATH`,
 and registers Pound with Windows so `.md` files can open with it. Then
