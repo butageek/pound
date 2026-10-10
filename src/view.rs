@@ -28,17 +28,22 @@ use wry::{http, WebView, WebViewBuilder, WebViewBuilderExtWindows};
 
 use crate::presenter::Presenter;
 use crate::register;
-use crate::theme::Theme;
+use crate::theme::{DarkPalette, LightPalette, Settings, Theme};
 use crate::update;
 
-/// The shell with the persisted theme injected (`window.poundTheme`):
-/// the head script resolves it before first paint, so the app never
-/// flashes the wrong theme.
-fn shell_html(theme: &Theme) -> String {
-    SHELL_HTML.replace(
-        "window.poundTheme = 'auto'",
-        &format!("window.poundTheme = '{}'", theme.as_str()),
-    )
+/// The shell with the persisted settings injected
+/// (`window.poundSettings`): the head script resolves the theme before
+/// first paint, so the app never flashes the wrong one.
+fn shell_html(settings: &Settings) -> String {
+    const PLACEHOLDER: &str =
+        "window.poundSettings = { mode: 'auto', light: 'solarized', dark: 'one-dark' };";
+    let injected = format!(
+        "window.poundSettings = {{ mode: '{}', light: '{}', dark: '{}' }};",
+        settings.theme.as_str(),
+        settings.light.as_str(),
+        settings.dark.as_str()
+    );
+    SHELL_HTML.replace(PLACEHOLDER, &injected)
 }
 
 /// How often to check the document for on-disk changes.
@@ -88,7 +93,7 @@ pub fn run(file: Option<PathBuf>) {
     }
 
     let builder = WebViewBuilder::new()
-        .with_html(shell_html(&register::load_theme()))
+        .with_html(shell_html(&register::load_settings()))
         .with_devtools(cfg!(debug_assertions))
         .with_custom_protocol("poundimg".into(), |_id, request| serve_local_image(request))
         // Chromium's default right-click menu (Copy / Print / an empty
@@ -110,7 +115,7 @@ pub fn run(file: Option<PathBuf>) {
     //   "exit"           the close prompt's Don't save: exit now
     //   "update"         the update toast's Update & restart
     //   "cancel-exit"    the close prompt's Cancel (clears pending update)
-    //   "theme\n<v>"      theme changed (auto/light/dark): persist only,
+    //   "setting\n<n> <v>" a settings-page change: validated, persisted;
     //                     the shell already applied it locally
     //   "edit\n<text>"   the (debounced) editor buffer changed
     let ipc_presenter = shared.clone();
@@ -196,9 +201,18 @@ pub fn run(file: Option<PathBuf>) {
             }
         } else if body == "cancel-exit" {
             ipc_update_on_exit.set(false);
-        } else if let Some(value) = body.strip_prefix("theme\n") {
-            if let Some(theme) = Theme::parse(value) {
-                register::save_theme(&theme);
+        } else if let Some(setting) = body.strip_prefix("setting\n") {
+            if let Some((name, value)) = setting.split_once(' ') {
+                // Validate before persisting; map to the registry value name.
+                let (valid, reg_name) = match name {
+                    "theme" => (Theme::parse(value).is_some(), "Theme"),
+                    "light" => (LightPalette::parse(value).is_some(), "LightPalette"),
+                    "dark" => (DarkPalette::parse(value).is_some(), "DarkPalette"),
+                    _ => (false, ""),
+                };
+                if valid {
+                    register::save_setting(reg_name, value);
+                }
             }
         } else if let Some(text) = body.strip_prefix("edit\n") {
             ipc_presenter.borrow_mut().edit_source(text);
@@ -535,12 +549,13 @@ const SHELL_HTML: &str = r#"<!doctype html>
 <head>
 <meta charset="utf-8">
 <style>
-  /* The theme is resolved by the head script (the persisted choice is
-     injected as window.poundTheme; Auto follows the system) and applied
-     as <html data-theme="light|dark">. color-scheme themes scrollbars and
-     form controls to match. Palettes: Solarized Light (Ethan Schoonover's
-     classic glare-reducing cream) and One Dark (Atom/Zed's soft slate) —
-     the eye-comfort standards from the editor world. */
+  /* The theme is resolved by the head script (the persisted settings are
+     injected as window.poundSettings; the mode may be Auto = follow the
+     system) and applied as <html data-theme="<palette>">. color-scheme
+     themes scrollbars and form controls to match. Palettes — the editor
+     world's eye-comfort standards: Solarized Light (cream), Catppuccin
+     Latte (soft gray), One Dark (Atom/Zed's slate), Catppuccin Mocha
+     (muted indigo night). */
   :root {
     color-scheme: light;
     --bg: #fdf6e3; --text: #586e75; --muted: #93a1a1; --border: #eee8d5;
@@ -548,12 +563,26 @@ const SHELL_HTML: &str = r#"<!doctype html>
     --th-bg: #eee8d5; --hover: rgba(147,161,161,0.15);
     --error-fg: #dc322f; --error-bg: rgba(220,50,47,0.08);
   }
-  :root[data-theme="dark"] {
+  :root[data-theme="latte"] {
+    color-scheme: light;
+    --bg: #eff1f5; --text: #4c4f69; --muted: #6c6f85; --border: #dce0e8;
+    --link: #1e66f5; --code-bg: rgba(140,143,168,0.15); --code-block-bg: #e6e9ef;
+    --th-bg: #e6e9ef; --hover: rgba(140,143,168,0.12);
+    --error-fg: #d20f39; --error-bg: rgba(210,15,57,0.08);
+  }
+  :root[data-theme="one-dark"] {
     color-scheme: dark;
     --bg: #282c34; --text: #abb2bf; --muted: #7f8792; --border: #3e4451;
     --link: #61afef; --code-bg: rgba(171,178,191,0.15); --code-block-bg: #2c313a;
     --th-bg: #2c313a; --hover: rgba(171,178,191,0.12);
     --error-fg: #e06c75; --error-bg: rgba(224,108,117,0.12);
+  }
+  :root[data-theme="mocha"] {
+    color-scheme: dark;
+    --bg: #1e1e2e; --text: #cdd6f4; --muted: #a6adc8; --border: #313244;
+    --link: #89b4fa; --code-bg: rgba(205,214,244,0.10); --code-block-bg: #181825;
+    --th-bg: #181825; --hover: rgba(205,214,244,0.08);
+    --error-fg: #f38ba8; --error-bg: rgba(243,139,168,0.12);
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -578,11 +607,6 @@ const SHELL_HTML: &str = r#"<!doctype html>
   #topbar button:hover:not(:disabled) { background: var(--hover); }
   #topbar button:disabled { color: var(--muted); cursor: default; opacity: 0.6; }
   #topbar .spacer { flex: 1; }
-  #topbar select {
-    font: 13px "Segoe UI", system-ui, sans-serif; color: var(--text);
-    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
-    padding: 3px 6px; cursor: pointer;
-  }
   #topbar label.toggle {
     display: flex; align-items: center; gap: 6px; font-size: 13px;
     cursor: pointer; user-select: none;
@@ -609,34 +633,52 @@ const SHELL_HTML: &str = r#"<!doctype html>
   #ctx-copy:hover { background: var(--hover); }
 
   /* ---- close prompt (unsaved changes) ---- */
-  #close-prompt {
+  /* ---- dialogs (close prompt, settings) ---- */
+  #close-prompt, #settings {
     display: none; position: fixed; inset: 0; z-index: 30;
     align-items: center; justify-content: center;
     background: rgba(0,0,0,0.35);
   }
-  #close-prompt .dialog {
+  #close-prompt .dialog, #settings .dialog {
     min-width: 320px; max-width: 440px; padding: 18px 20px 16px;
     background: var(--bg); border: 1px solid var(--border);
     border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,0.3);
   }
-  #close-prompt .dialog-title { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
+  #close-prompt .dialog-title, #settings .dialog-title {
+    font-size: 15px; font-weight: 600; margin-bottom: 6px;
+  }
   #close-prompt .dialog-body {
     font-size: 13px; color: var(--muted); margin-bottom: 16px;
     overflow-wrap: anywhere;
   }
-  #close-prompt .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+  .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
-  /* Buttons shared by the close prompt and the update toast. */
-  #close-prompt button, #update button {
+  /* Settings rows: label left, control right; changes apply live. */
+  #settings .setting-row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; margin: 12px 0;
+  }
+  #settings label { font-size: 13px; }
+  #settings select {
+    font: 13px "Segoe UI", system-ui, sans-serif; color: var(--text);
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 5px 8px; min-width: 190px; cursor: pointer;
+  }
+
+  /* Buttons shared by the dialogs and the update toast. */
+  #close-prompt button, #settings button, #update button {
     font: 13px "Segoe UI", system-ui, sans-serif; color: var(--text);
     background: transparent; border: 1px solid var(--border); border-radius: 6px;
     padding: 5px 14px; cursor: pointer;
   }
-  #close-prompt button:hover, #update button:hover { background: var(--hover); }
-  #close-prompt button.primary, #update button.primary {
+  #close-prompt button:hover, #settings button:hover, #update button:hover {
+    background: var(--hover);
+  }
+  #close-prompt button.primary, #settings button.primary, #update button.primary {
     background: var(--link); border-color: var(--link); color: #fff;
   }
-  #close-prompt button.primary:hover, #update button.primary:hover {
+  #close-prompt button.primary:hover, #settings button.primary:hover,
+  #update button.primary:hover {
     background: var(--link); filter: brightness(1.12);
   }
 
@@ -785,15 +827,17 @@ const SHELL_HTML: &str = r#"<!doctype html>
 </style>
 <script>
   // Resolve the theme before first paint so the app never flashes the
-  // wrong one: the host injects the persisted choice as window.poundTheme
-  // (see shell_html in view.rs); Auto follows the system.
-  window.poundTheme = 'auto';
+  // wrong one: the host injects the persisted settings as
+  // window.poundSettings (see shell_html in view.rs). Auto follows the
+  // system; each mode then uses its chosen palette.
+  window.poundSettings = { mode: 'auto', light: 'solarized', dark: 'one-dark' };
   (function () {
-    var pref = window.poundTheme;
-    if (pref === 'auto') {
-      pref = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    var s = window.poundSettings;
+    var mode = s.mode;
+    if (mode === 'auto') {
+      mode = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
     }
-    document.documentElement.dataset.theme = pref;
+    document.documentElement.dataset.theme = mode === 'dark' ? s.dark : s.light;
   })();
 </script>
 </head>
@@ -801,11 +845,7 @@ const SHELL_HTML: &str = r#"<!doctype html>
   <div id="topbar">
     <span class="brand">Pound</span>
     <span class="spacer"></span>
-    <select id="theme" title="Theme">
-      <option value="auto">Auto</option>
-      <option value="light">Light</option>
-      <option value="dark">Dark</option>
-    </select>
+    <button id="settings-open" type="button">Settings</button>
     <button id="save" type="button" disabled>Save <kbd>Ctrl+S</kbd></button>
     <label class="toggle">
       <input type="checkbox" id="source-toggle"> Source <kbd>Ctrl+U</kbd>
@@ -849,6 +889,36 @@ const SHELL_HTML: &str = r#"<!doctype html>
         <button id="close-cancel" type="button">Cancel</button>
         <button id="close-discard" type="button">Don't save</button>
         <button id="close-save" class="primary" type="button">Save</button>
+      </div>
+    </div>
+  </div>
+  <div id="settings">
+    <div class="dialog">
+      <div class="dialog-title">Settings</div>
+      <div class="setting-row">
+        <label for="setting-mode">Theme</label>
+        <select id="setting-mode">
+          <option value="auto">Auto (follow system)</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </div>
+      <div class="setting-row">
+        <label for="setting-light">Light palette</label>
+        <select id="setting-light">
+          <option value="solarized">Solarized Light</option>
+          <option value="latte">Catppuccin Latte</option>
+        </select>
+      </div>
+      <div class="setting-row">
+        <label for="setting-dark">Dark palette</label>
+        <select id="setting-dark">
+          <option value="one-dark">One Dark</option>
+          <option value="mocha">Catppuccin Mocha</option>
+        </select>
+      </div>
+      <div class="dialog-actions">
+        <button id="settings-close" class="primary" type="button">Close</button>
       </div>
     </div>
   </div>
@@ -926,12 +996,6 @@ const SHELL_HTML: &str = r#"<!doctype html>
     setUpdatingProgress(line) {
       document.getElementById('update-progress-line').textContent =
         line.replace(/^===>\s*/, '');
-    },
-    // Apply a theme preference (auto/light/dark). The select applies it
-    // locally on change; the host only persists the choice.
-    setTheme(pref) {
-      document.getElementById('theme').value = pref;
-      applyTheme(pref);
     },
   };
 
@@ -1076,25 +1140,45 @@ const SHELL_HTML: &str = r#"<!doctype html>
     }
   });
 
-  // ---- theme ----------------------------------------------------------
-  // Auto resolves through matchMedia (and follows live system changes);
-  // Light/Dark are forced via <html data-theme>. The choice persists on
-  // the host side (HKCU), never re-reads it here.
-  function applyTheme(pref) {
-    let resolved = pref;
-    if (pref === 'auto') {
-      resolved = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  // ---- settings ---------------------------------------------------------
+  // Theme mode + one palette per mode (Zed-style). Every change applies
+  // live and is persisted by the host; there is no OK/Cancel by design.
+  const settings = Object.assign(
+    { mode: 'auto', light: 'solarized', dark: 'one-dark' },
+    window.poundSettings
+  );
+  function applyTheme() {
+    let mode = settings.mode;
+    if (mode === 'auto') {
+      mode = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
     }
-    document.documentElement.dataset.theme = resolved;
+    document.documentElement.dataset.theme = mode === 'dark' ? settings.dark : settings.light;
   }
-  const themeSelect = document.getElementById('theme');
-  themeSelect.value = window.poundTheme;
-  themeSelect.onchange = () => {
-    applyTheme(themeSelect.value);
-    hostSend('theme\n' + themeSelect.value);
+  const bindSetting = (id, key, name) => {
+    const select = document.getElementById(id);
+    select.value = settings[key];
+    select.onchange = () => {
+      settings[key] = select.value;
+      applyTheme();
+      hostSend('setting\n' + name + ' ' + select.value);
+    };
   };
+  bindSetting('setting-mode', 'mode', 'theme');
+  bindSetting('setting-light', 'light', 'light');
+  bindSetting('setting-dark', 'dark', 'dark');
+
+  const settingsDialog = document.getElementById('settings');
+  const hideSettings = () => (settingsDialog.style.display = 'none');
+  document.getElementById('settings-open').onclick = () =>
+    (settingsDialog.style.display = 'flex');
+  document.getElementById('settings-close').onclick = hideSettings;
+  settingsDialog.addEventListener('click', e => {
+    if (e.target === settingsDialog) hideSettings(); // click on the backdrop
+  });
+  addEventListener('keydown', e => { if (e.key === 'Escape') hideSettings(); });
+  // While on Auto, follow live system theme changes.
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-    if (themeSelect.value === 'auto') applyTheme('auto');
+    if (settings.mode === 'auto') applyTheme();
   });
 
   // ---- context menu --------------------------------------------------

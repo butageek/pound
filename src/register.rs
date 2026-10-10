@@ -19,7 +19,7 @@
 //!     FileAssociations\.md = Pound.md
 //! ```
 
-use crate::theme::Theme;
+use crate::theme::{DarkPalette, LightPalette, Settings, Theme};
 use std::io;
 use std::path::PathBuf;
 
@@ -75,25 +75,34 @@ fn notify_assoc_changed() {
 /// already a console, pipe, or redirected file (installers capture output
 /// via `Start-Process -RedirectStandardOutput`), we leave it alone so the
 /// redirection keeps working.
-/// The user's theme choice (`HKCU\Software\Pound\Theme`); Auto when the
-/// value is missing or garbage (e.g. written by a future version).
-pub fn load_theme() -> Theme {
-    let read = RegKey::predef(HKEY_CURRENT_USER)
+/// Read one setting from `HKCU\Software\Pound`; `None` when missing or
+/// unreadable (callers fall back to defaults).
+fn load_setting(name: &str) -> Option<String> {
+    RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey("Software\\Pound")
-        .and_then(|key| key.get_value::<String, _>("Theme"));
-    read.ok()
-        .and_then(|value| Theme::parse(&value))
-        .unwrap_or_default()
+        .and_then(|key| key.get_value::<String, _>(name))
+        .ok()
 }
 
-/// Persist the theme choice. Best-effort: a locked-down registry just
-/// means the choice lasts for this session.
-pub fn save_theme(theme: &Theme) {
+/// Persist one setting. Best-effort: a locked-down registry just means
+/// the choice lasts for this session.
+pub fn save_setting(name: &str, value: &str) {
     let written = RegKey::predef(HKEY_CURRENT_USER)
         .create_subkey("Software\\Pound")
-        .and_then(|(key, _)| key.set_value("Theme", &theme.as_str()));
+        .and_then(|(key, _)| key.set_value(name, &value));
     if let Err(e) = written {
-        eprintln!("pound: could not save the theme choice: {e}");
+        eprintln!("pound: could not save the {name} setting: {e}");
+    }
+}
+
+/// All appearance settings. Garbage values (e.g. written by a future
+/// version) fall back to the defaults per-field.
+pub fn load_settings() -> Settings {
+    let get = |name: &str| load_setting(name).unwrap_or_default();
+    Settings {
+        theme: Theme::parse(&get("Theme")).unwrap_or_default(),
+        light: LightPalette::parse(&get("LightPalette")).unwrap_or_default(),
+        dark: DarkPalette::parse(&get("DarkPalette")).unwrap_or_default(),
     }
 }
 
