@@ -653,6 +653,9 @@ const SHELL_HTML: &str = r#"<!doctype html>
     font: 13px "Segoe UI", system-ui, sans-serif; color: var(--text);
     background: transparent; border: 0; border-radius: 5px; padding: 6px 10px; cursor: pointer;
   }
+  /* The `display: flex` above out-specifies the UA's `[hidden] { display: none }`;
+     without this, Cut/Paste/Select All would show in the read-only rendered pane. */
+  #ctx-menu button[hidden] { display: none; }
   #ctx-menu button:disabled { color: var(--muted); cursor: default; }
   #ctx-menu button:hover:not(:disabled) { background: var(--hover); }
 

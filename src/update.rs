@@ -7,6 +7,7 @@
 //! same battle-tested path a manual upgrade takes. Failures are silent:
 //! a check that cannot reach the network just never shows a notice.
 
+#[cfg(windows)] // Path is used only by the Windows installer spawn below
 use std::path::Path;
 use std::sync::Mutex;
 
