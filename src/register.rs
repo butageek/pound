@@ -114,6 +114,7 @@ pub fn load_settings() -> Settings {
         theme: Theme::parse(&get("Theme")).unwrap_or_default(),
         light: LightPalette::parse(&get("LightPalette")).unwrap_or_default(),
         dark: DarkPalette::parse(&get("DarkPalette")).unwrap_or_default(),
+        font_size: crate::theme::parse_font_size(&get("FontSize")).unwrap_or_default(),
         font,
     }
 }

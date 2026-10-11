@@ -37,18 +37,19 @@ use crate::update;
 /// never flashes the wrong ones.
 fn shell_html(settings: &Settings, fonts: &[String]) -> String {
     const PLACEHOLDER: &str =
-        "window.poundSettings = { mode: 'auto', light: 'solarized', dark: 'one-dark', font: '' };";
+        "window.poundSettings = { mode: 'auto', light: 'solarized', dark: 'one-dark', font: '', size: 15.5 };";
     const FONTS_PLACEHOLDER: &str = "window.poundFonts = [];";
     let font = match &settings.font {
         Some(name) => json_str(name),
         None => "''".to_owned(),
     };
     let settings_injected = format!(
-        "window.poundSettings = {{ mode: '{}', light: '{}', dark: '{}', font: {} }};",
+        "window.poundSettings = {{ mode: '{}', light: '{}', dark: '{}', font: {}, size: {} }};",
         settings.theme.as_str(),
         settings.light.as_str(),
         settings.dark.as_str(),
         font,
+        settings.font_size,
     );
     let quoted: Vec<String> = fonts.iter().map(|n| json_str(n)).collect();
     let fonts_injected = format!("window.poundFonts = [{}];", quoted.join(", "));
@@ -245,6 +246,7 @@ pub fn run(file: Option<PathBuf>) {
                         value.is_empty() || ipc_fonts.iter().any(|f| f == value),
                         "Font",
                     ),
+                    "size" => (crate::theme::parse_font_size(value).is_some(), "FontSize"),
                     _ => (false, ""),
                 };
                 if valid {
@@ -623,6 +625,10 @@ const SHELL_HTML: &str = r#"<!doctype html>
        uninstalled names readable. */
     --reader-font: var(--reader-choice, "Segoe UI"), "Segoe UI Variable Text", system-ui, sans-serif;
     --mono-font: var(--mono-choice, Consolas), "Cascadia Mono", monospace;
+    /* Base font size shared by the rendered and source panes (the
+       Settings page overrides it inline); everything inside them is
+       sized in em/% so it scales along. */
+    --font-size: 15.5px;
   }
   :root[data-theme="latte"] {
     color-scheme: light;
@@ -813,7 +819,7 @@ const SHELL_HTML: &str = r#"<!doctype html>
     display: block; width: 100%; height: 100%; margin: 0;
     padding: 14px 18px 60px; border: 0; outline: none; resize: none;
     background: transparent; color: var(--text);
-    font: 12.5px/1.6 var(--mono-font);
+    font-family: var(--mono-font); font-size: var(--font-size); line-height: 1.6;
     white-space: pre; tab-size: 4;
     overflow: auto; scrollbar-gutter: stable;
   }
@@ -847,7 +853,7 @@ const SHELL_HTML: &str = r#"<!doctype html>
     /* Full pane width like VSCode's preview (no centered reading column). */
     padding: 26px 40px 120px;
     font-family: var(--reader-font);
-    font-size: 15.5px; line-height: 1.65;
+    font-size: var(--font-size); line-height: 1.65;
   }
   #content h1, #content h2, #content h3, #content h4, #content h5, #content h6 {
     font-weight: 600; line-height: 1.25; margin: 26px 0 14px; scroll-margin-top: 60px;
@@ -867,7 +873,7 @@ const SHELL_HTML: &str = r#"<!doctype html>
     position: relative; background: var(--code-block-bg); border-radius: 6px;
     padding: 14px 16px; margin: 0 0 16px; overflow: auto; line-height: 1.45;
   }
-  #content pre code { background: none; padding: 0; font-size: 13px; }
+  #content pre code { background: none; padding: 0; font-size: 85%; }
   #content pre .copy-btn {
     position: absolute; top: 6px; right: 6px; opacity: 0;
     font: 11px "Segoe UI", sans-serif; color: var(--muted);
@@ -904,7 +910,7 @@ const SHELL_HTML: &str = r#"<!doctype html>
   // system; each mode then uses its chosen palette. The chosen font is
   // applied for the same reason (the body's applyFonts re-runs and owns
   // the full logic).
-  window.poundSettings = { mode: 'auto', light: 'solarized', dark: 'one-dark', font: '' };
+  window.poundSettings = { mode: 'auto', light: 'solarized', dark: 'one-dark', font: '', size: 15.5 };
   window.poundFonts = [];
   (function () {
     var s = window.poundSettings;
@@ -914,13 +920,15 @@ const SHELL_HTML: &str = r#"<!doctype html>
     }
     document.documentElement.dataset.theme = mode === 'dark' ? s.dark : s.light;
     // Only the family choice is set here; the fallback stacks live once
-    // in the :root CSS (--reader-font / --mono-font compose it).
+    // in the :root CSS (--reader-font / --mono-font compose it). The
+    // size needs no conditionality — :root already defaults it.
+    var style = document.documentElement.style;
     if (s.font) {
       var choice = '"' + s.font + '"';
-      var style = document.documentElement.style;
       style.setProperty('--reader-choice', choice);
       style.setProperty('--mono-choice', choice);
     }
+    style.setProperty('--font-size', s.size + 'px');
   })();
 </script>
 </head>
@@ -1011,6 +1019,16 @@ const SHELL_HTML: &str = r#"<!doctype html>
         <label for="setting-font">Typeface</label>
         <select id="setting-font">
           <option value="">System default</option>
+        </select>
+      </div>
+      <div class="setting-row">
+        <label for="setting-size">Size</label>
+        <select id="setting-size">
+          <option value="12">12 px</option>
+          <option value="13.5">13.5 px</option>
+          <option value="15.5">15.5 px (default)</option>
+          <option value="17.5">17.5 px</option>
+          <option value="20">20 px</option>
         </select>
       </div>
       <div class="dialog-actions">
@@ -1250,7 +1268,7 @@ const SHELL_HTML: &str = r#"<!doctype html>
   // and editing surface. Every change applies live and is persisted by
   // the host; there is no OK/Cancel by design.
   const settings = Object.assign(
-    { mode: 'auto', light: 'solarized', dark: 'one-dark', font: '' },
+    { mode: 'auto', light: 'solarized', dark: 'one-dark', font: '', size: 15.5 },
     window.poundSettings
   );
   // applyFonts sets or clears the *-choice variables; the fallback
@@ -1265,6 +1283,10 @@ const SHELL_HTML: &str = r#"<!doctype html>
     apply('--reader-choice', settings.font);
     apply('--mono-choice', settings.font);
   }
+  // One size for both panes — they were hardcoded to mismatched sizes
+  // (12.5px source vs 15.5px rendered) before this setting existed.
+  const applyFontSize = () =>
+    document.documentElement.style.setProperty('--font-size', settings.size + 'px');
   function applyTheme() {
     let mode = settings.mode;
     if (mode === 'auto') {
@@ -1279,6 +1301,7 @@ const SHELL_HTML: &str = r#"<!doctype html>
       settings[key] = select.value;
       applyTheme();
       applyFonts();
+      applyFontSize();
       hostSend('setting\n' + name + ' ' + select.value);
     };
   };
@@ -1286,6 +1309,7 @@ const SHELL_HTML: &str = r#"<!doctype html>
   bindSetting('setting-light', 'light', 'light');
   bindSetting('setting-dark', 'dark', 'dark');
   bindSetting('setting-font', 'font', 'font');
+  bindSetting('setting-size', 'size', 'size');
   // Fill the font select from the host's enumeration; each option
   // previews in its own family, and a persisted-but-uninstalled font
   // (the host already dropped it from poundSettings) shows as default.

@@ -83,9 +83,22 @@ impl DarkPalette {
     }
 }
 
+/// The reading font size (px) shared by the rendered and source panes.
+/// A closed set — the Settings select offers exactly these — persisted
+/// as `FontSize`; anything else falls back to the default.
+pub const FONT_SIZES: [f32; 5] = [12.0, 13.5, 15.5, 17.5, 20.0];
+pub const DEFAULT_FONT_SIZE: f32 = 15.5;
+
+/// Parse a persisted size (the select's value, e.g. "15.5"); `None`
+/// unless it is one of `FONT_SIZES`.
+pub fn parse_font_size(value: &str) -> Option<f32> {
+    let px = value.trim().parse::<f32>().ok()?;
+    FONT_SIZES.contains(&px).then_some(px)
+}
+
 /// All persisted appearance settings, injected into the shell before
 /// first paint (see `shell_html` in the view).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Settings {
     pub theme: Theme,
     pub light: LightPalette,
@@ -94,6 +107,20 @@ pub struct Settings {
     /// the default stacks. Persisted as `Font` (free-form; the view
     /// drops names that are no longer installed).
     pub font: Option<String>,
+    /// Reading font size in px; `DEFAULT_FONT_SIZE` unless set.
+    pub font_size: f32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            theme: Theme::default(),
+            light: LightPalette::default(),
+            dark: DarkPalette::default(),
+            font: None,
+            font_size: DEFAULT_FONT_SIZE,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -120,5 +147,21 @@ mod tests {
         assert_eq!(DarkPalette::parse("latte"), None);
         assert_eq!(Theme::parse(""), None);
         assert_eq!(Settings::default().theme, Theme::Auto);
+    }
+
+    #[test]
+    fn font_size_values_round_trip() {
+        for size in FONT_SIZES {
+            assert_eq!(parse_font_size(&size.to_string()), Some(size));
+        }
+        assert_eq!(Settings::default().font_size, DEFAULT_FONT_SIZE);
+    }
+
+    #[test]
+    fn unknown_font_sizes_do_not_parse() {
+        assert_eq!(parse_font_size("15"), None); // 15.5 is the default, not 15
+        assert_eq!(parse_font_size("0"), None);
+        assert_eq!(parse_font_size("garbage"), None);
+        assert_eq!(parse_font_size(""), None);
     }
 }
