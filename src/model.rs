@@ -46,6 +46,9 @@ impl Document {
 
     /// Human-facing file type for the status bar, e.g. `Markdown` or `TXT file`.
     pub fn type_label(&self) -> String {
+        if is_markdown_path(&self.path) {
+            return "Markdown".to_owned();
+        }
         let ext = self
             .path
             .extension()
@@ -53,28 +56,35 @@ impl Document {
             .unwrap_or("")
             .to_ascii_lowercase();
         match ext.as_str() {
-            "md" | "markdown" => "Markdown".to_owned(),
             "txt" => "Plain text".to_owned(),
             "" => "File".to_owned(),
             other => format!("{} file", other.to_ascii_uppercase()),
         }
     }
+
+    /// Plain-text files render nothing; the view shows the source pane
+    /// alone (see `render`).
+    pub fn is_plain(&self) -> bool {
+        !is_markdown_path(&self.path)
+    }
 }
 
-/// Render a file for the preview: markdown extensions through the
-/// markdown pipeline, everything else as plain text (a `.txt` or log
-/// full of `#`/`*` must not be reinterpreted as markdown). Keep the
-/// extension set in sync with the one `type_label` calls "Markdown".
+/// Render a markdown file for the preview; plain-text files render
+/// nothing (`html` stays empty — the view shows the source pane alone).
 fn render(path: &Path, source: &str) -> String {
-    let is_markdown = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown"));
-    if is_markdown {
+    if is_markdown_path(path) {
         markdown::to_html(source, path.parent().unwrap_or(Path::new(".")))
     } else {
-        markdown::to_plain_html(source)
+        String::new()
     }
+}
+
+/// The extensions this app treats as markdown. One source of truth for
+/// rendering, the plain/source-pane view mode and `type_label`.
+pub(crate) fn is_markdown_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown"))
 }
 
 /// `Path::canonicalize` returns Windows verbatim paths (`\\?\C:\…`,
@@ -145,6 +155,8 @@ impl Model {
             return;
         }
         doc.source = text.to_owned();
+        // render() no-ops for plain files (the source pane is the view),
+        // so this is safe for every document kind.
         doc.html = render(&doc.path, &doc.source);
         self.revision += 1;
         self.dirty = true;
@@ -250,47 +262,35 @@ mod tests {
     }
 
     #[test]
-    fn non_markdown_files_render_as_plain_text() {
-        // A text file full of markdown-ish characters must not be
-        // reinterpreted: headings, emphasis and tags all stay inert.
+    fn non_markdown_files_open_in_the_source_pane() {
+        // Plain files render nothing (html stays empty): the source pane
+        // is the whole view, so markdown-ish characters stay inert by
+        // construction and edits never re-render.
         let dir = std::env::temp_dir().join(format!("pound-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let txt = dir.join("log.txt");
-        std::fs::write(&txt, "# not a heading\n*blob* <tag> & 42\n").unwrap();
+        std::fs::write(&txt, "# not a heading\n*blob* <tag>\n").unwrap();
         let mut model = Model::default();
         model.open(&txt);
         let doc = model.document.as_ref().unwrap();
-        assert!(doc.html.contains("&lt;tag&gt;"), "escaped: {}", doc.html);
-        assert!(!doc.html.contains("<h1>"), "no markdown: {}", doc.html);
-        assert!(
-            doc.html.contains("# not a heading"),
-            "verbatim: {}",
-            doc.html
-        );
-        assert!(
-            doc.html.contains("data-line-start=\"1\""),
-            "sync anchor: {}",
-            doc.html
-        );
+        assert!(doc.is_plain());
+        assert_eq!(doc.html, "");
+        assert_eq!(doc.source, "# not a heading\n*blob* <tag>\n");
 
-        // The editor round-trip keeps plain rendering (the source pane's
-        // live preview must not suddenly markdown-ify the file).
         model.edit("# still plain <x>\n");
         let doc = model.document.as_ref().unwrap();
-        assert!(!doc.html.contains("<h1>"), "edits stay plain: {}", doc.html);
-        assert!(
-            doc.html.contains("&lt;x&gt;"),
-            "escaped on edit: {}",
-            doc.html
-        );
+        assert_eq!(doc.html, "", "edits never render: {}", doc.html);
+        assert_eq!(doc.source, "# still plain <x>\n");
 
-        // …while actual markdown keeps rendering as markdown (a distinct
+        // ...while actual markdown keeps rendering as markdown (a distinct
         // file name: tests in this module share the temp dir and run in
         // parallel).
         let md = dir.join("real.md");
         std::fs::write(&md, "# real heading\n").unwrap();
         model.open(&md);
-        assert!(model.document.as_ref().unwrap().html.contains("<h1>"));
+        let doc = model.document.as_ref().unwrap();
+        assert!(!doc.is_plain());
+        assert!(doc.html.contains("<h1>"));
     }
 
     #[test]

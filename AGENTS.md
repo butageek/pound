@@ -51,14 +51,15 @@ file types (CSV next). Architecture is strict MVP
   baselines, code chips and tables are an endless whack-a-mole).
 - Guiding principle: "the file's bytes are the truth; rendering is a
   layer; when rendering fails, fall back to source, never eat content."
-- **Only markdown extensions render as markdown.** `model::render`
-  routes by extension (`.md`/`.markdown` → the pipeline above;
-  everything else → `markdown::to_plain_html`): a `.txt`/log full of
-  `#`/`*` must not be reinterpreted. Plain files render as one escaped
-  `<pre class="plain">` inside a single `data-line` div (uniform line
-  heights, so the scroll sync interpolates exactly), with edits in the
-  source pane re-rendering plain too. The status bar says "Plain text"/
-  "LOG file"/… via `Document::type_label`.
+- **Only markdown extensions render as markdown.** `model::
+  is_markdown_path` (`.md`/`.markdown`) is the one source of truth for
+  rendering, the plain view mode and `type_label`. Every other text
+  file renders **nothing** (`html` stays empty, edits never re-render):
+  the view shows the **editable source pane alone** — a text file is
+  its own source, so there is no second pane, no Source toggle
+  (`body.plain` CSS), full editor right-click menu, and the scroll
+  sync is inert (no anchor blocks). `markdown::to_plain_html` was
+  removed when this landed.
 - **Syntax highlighting** happens in `markdown.rs` at render time:
   fenced blocks with a language syntect knows are highlighted into
   classed spans (`<span class="storage type …">`, `highlight_codeblocks`

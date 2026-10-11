@@ -550,24 +550,26 @@ fn eval_script(webview: &WebView, js: String) {
 /// this must never run for edit-driven updates.
 fn push_document(webview: &WebView, presenter: &Presenter) {
     let model = &presenter.model;
-    let (html, source, path) = match &model.document {
+    let (html, source, path, plain) = match &model.document {
         Some(doc) => (
             doc.html.as_str(),
             doc.source.as_str(),
             doc.path.display().to_string(),
+            doc.is_plain(),
         ),
-        None => ("", "", String::new()),
+        None => ("", "", String::new(), false),
     };
     eval_script(
         webview,
         format!(
-            "pound.setContent({}, {}, {}, {}, {}, {}); pound.setError({});",
+            "pound.setContent({}, {}, {}, {}, {}, {}, {}); pound.setError({});",
             json_str(html),
             json_str(source),
             json_str(&current_title(presenter)),
             json_str(&path),
             json_str(&status_text(presenter)),
             model.dirty,
+            plain,
             json_str(model.error.as_deref().unwrap_or("")),
         ),
     );
@@ -891,6 +893,13 @@ const SHELL_HTML: &str = r#"<!doctype html>
   }
   #source-wrap { display: none; flex: 1 1 0; min-width: 0; background: var(--bg); }
   body.split #source-wrap { display: block; }
+  /* A plain-text file IS its own source: the editable pane is the whole
+     view — no rendered pane, no Source toggle (nothing to toggle). The
+     leftover `split` class is overridden rather than removed, so the
+     toggle state survives when a markdown file is opened next. */
+  body.plain #content-wrap { display: none; }
+  body.plain #source-wrap { display: block; }
+  body.plain #topbar .toggle { display: none; }
   /* The source pane is a plain textarea: a real editor with native caret,
      selection and undo. It is never rewritten during editing (pushes go to
      pound.setRendered) so that state survives every keystroke. */
@@ -953,12 +962,6 @@ const SHELL_HTML: &str = r#"<!doctype html>
     padding: 14px 16px; margin: 0 0 16px; overflow: auto; line-height: 1.45;
   }
   #content pre code { background: none; padding: 0; font-size: 85%; }
-  /* A plain-text file is one big pre; keep it looking like a text
-     document, not a code block. */
-  #content pre.plain {
-    background: none; padding: 0; border-radius: 0; margin: 0;
-    font-family: var(--mono-font);
-  }
   /* Syntax highlighting: syntect emits classed spans ("storage type",
      "constant numeric", …); the per-palette --syn-* vars above color
      them. Single-token selectors match any scope containing the token,
@@ -1134,14 +1137,15 @@ const SHELL_HTML: &str = r#"<!doctype html>
   </div>
 <script>
   window.pound = {
-    setContent(html, source, title, path, status, edited) {
+    setContent(html, source, title, path, status, edited, plain) {
+      document.body.classList.toggle('plain', plain);
       const wrap = document.getElementById('content-wrap');
       const scroll = wrap.scrollTop;
       const content = document.getElementById('content');
       const welcome = document.getElementById('welcome');
       content.innerHTML = html;
       content.style.display = html ? 'block' : 'none';
-      welcome.style.display = html ? 'none' : 'flex';
+      welcome.style.display = html || plain ? 'none' : 'flex';
       sourceEl.value = source;
       // Park the caret at the top: a value assignment leaves it at the
       // end, so the first focus would auto-scroll the pane to the bottom.
@@ -1252,6 +1256,14 @@ const SHELL_HTML: &str = r#"<!doctype html>
 
   const toggle = document.getElementById('source-toggle');
   const applySplit = () => {
+    // Plain files show only the source pane; there is nothing to toggle.
+    // Drop the split class too, so a later markdown file does not open
+    // with a source pane its (unchecked) toggle disagrees with.
+    if (document.body.classList.contains('plain')) {
+      toggle.checked = false;
+      document.body.classList.remove('split');
+      return;
+    }
     document.body.classList.toggle('split', toggle.checked);
     // Opening the source pane aligns it with what's on screen (VSCode-style).
     if (toggle.checked) syncSourceFromContent();
