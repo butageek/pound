@@ -28,7 +28,7 @@ impl Document {
         let modified = fs::metadata(&absolute).and_then(|m| m.modified()).ok();
         let crlf = source.contains("\r\n");
         Ok(Document {
-            html: markdown::to_html(&source, absolute.parent().unwrap_or(Path::new("."))),
+            html: render(&absolute, &source),
             path: absolute,
             source,
             modified,
@@ -58,6 +58,22 @@ impl Document {
             "" => "File".to_owned(),
             other => format!("{} file", other.to_ascii_uppercase()),
         }
+    }
+}
+
+/// Render a file for the preview: markdown extensions through the
+/// markdown pipeline, everything else as plain text (a `.txt` or log
+/// full of `#`/`*` must not be reinterpreted as markdown). Keep the
+/// extension set in sync with the one `type_label` calls "Markdown".
+fn render(path: &Path, source: &str) -> String {
+    let is_markdown = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown"));
+    if is_markdown {
+        markdown::to_html(source, path.parent().unwrap_or(Path::new(".")))
+    } else {
+        markdown::to_plain_html(source)
     }
 }
 
@@ -129,7 +145,7 @@ impl Model {
             return;
         }
         doc.source = text.to_owned();
-        doc.html = markdown::to_html(&doc.source, doc.path.parent().unwrap_or(Path::new(".")));
+        doc.html = render(&doc.path, &doc.source);
         self.revision += 1;
         self.dirty = true;
     }
@@ -231,6 +247,50 @@ mod tests {
         model.open(Path::new("/definitely/not/here.md"));
         assert!(model.document.is_none());
         assert!(model.error.is_some());
+    }
+
+    #[test]
+    fn non_markdown_files_render_as_plain_text() {
+        // A text file full of markdown-ish characters must not be
+        // reinterpreted: headings, emphasis and tags all stay inert.
+        let dir = std::env::temp_dir().join(format!("pound-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let txt = dir.join("log.txt");
+        std::fs::write(&txt, "# not a heading\n*blob* <tag> & 42\n").unwrap();
+        let mut model = Model::default();
+        model.open(&txt);
+        let doc = model.document.as_ref().unwrap();
+        assert!(doc.html.contains("&lt;tag&gt;"), "escaped: {}", doc.html);
+        assert!(!doc.html.contains("<h1>"), "no markdown: {}", doc.html);
+        assert!(
+            doc.html.contains("# not a heading"),
+            "verbatim: {}",
+            doc.html
+        );
+        assert!(
+            doc.html.contains("data-line-start=\"1\""),
+            "sync anchor: {}",
+            doc.html
+        );
+
+        // The editor round-trip keeps plain rendering (the source pane's
+        // live preview must not suddenly markdown-ify the file).
+        model.edit("# still plain <x>\n");
+        let doc = model.document.as_ref().unwrap();
+        assert!(!doc.html.contains("<h1>"), "edits stay plain: {}", doc.html);
+        assert!(
+            doc.html.contains("&lt;x&gt;"),
+            "escaped on edit: {}",
+            doc.html
+        );
+
+        // …while actual markdown keeps rendering as markdown (a distinct
+        // file name: tests in this module share the temp dir and run in
+        // parallel).
+        let md = dir.join("real.md");
+        std::fs::write(&md, "# real heading\n").unwrap();
+        model.open(&md);
+        assert!(model.document.as_ref().unwrap().html.contains("<h1>"));
     }
 
     #[test]

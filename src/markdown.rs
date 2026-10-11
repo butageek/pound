@@ -41,6 +41,32 @@ pub fn to_html(source: &str, base_dir: &Path) -> String {
     sanitize(&raw)
 }
 
+/// Render a plain-text file: one escaped `<pre>` spanning all lines,
+/// wrapped in the same single `data-line` div the scroll sync anchors
+/// to. No markdown interpretation — the file's bytes are the truth —
+/// and nothing to sanitize: every tag-forming character is escaped.
+pub fn to_plain_html(source: &str) -> String {
+    let lines = source.lines().count().max(1);
+    let mut escaped = String::with_capacity(source.len());
+    escape_text(&mut escaped, source);
+    format!(
+        r#"<div data-line-start="1" data-line-end="{lines}"><pre class="plain">{escaped}</pre></div>"#
+    )
+}
+
+/// Escape text for HTML body content (`&`, `<`, `>`, quotes).
+fn escape_text(out: &mut String, text: &str) {
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            c => out.push(c),
+        }
+    }
+}
+
 /// Rewrite local image `src`s to the `poundimg://` protocol; pass every
 /// other event through untouched.
 fn localize_image_event<'a>(event: Event<'a>, base_dir: &Path) -> Event<'a> {

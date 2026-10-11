@@ -51,6 +51,14 @@ file types (CSV next). Architecture is strict MVP
   baselines, code chips and tables are an endless whack-a-mole).
 - Guiding principle: "the file's bytes are the truth; rendering is a
   layer; when rendering fails, fall back to source, never eat content."
+- **Only markdown extensions render as markdown.** `model::render`
+  routes by extension (`.md`/`.markdown` → the pipeline above;
+  everything else → `markdown::to_plain_html`): a `.txt`/log full of
+  `#`/`*` must not be reinterpreted. Plain files render as one escaped
+  `<pre class="plain">` inside a single `data-line` div (uniform line
+  heights, so the scroll sync interpolates exactly), with edits in the
+  source pane re-rendering plain too. The status bar says "Plain text"/
+  "LOG file"/… via `Document::type_label`.
 - **Syntax highlighting** happens in `markdown.rs` at render time:
   fenced blocks with a language syntect knows are highlighted into
   classed spans (`<span class="storage type …">`, `highlight_codeblocks`

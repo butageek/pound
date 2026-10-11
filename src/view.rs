@@ -953,6 +953,12 @@ const SHELL_HTML: &str = r#"<!doctype html>
     padding: 14px 16px; margin: 0 0 16px; overflow: auto; line-height: 1.45;
   }
   #content pre code { background: none; padding: 0; font-size: 85%; }
+  /* A plain-text file is one big pre; keep it looking like a text
+     document, not a code block. */
+  #content pre.plain {
+    background: none; padding: 0; border-radius: 0; margin: 0;
+    font-family: var(--mono-font);
+  }
   /* Syntax highlighting: syntect emits classed spans ("storage type",
      "constant numeric", …); the per-palette --syn-* vars above color
      them. Single-token selectors match any scope containing the token,
