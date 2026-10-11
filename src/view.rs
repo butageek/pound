@@ -148,6 +148,9 @@ pub fn run(file: Option<PathBuf>) {
     //                     the shell already applied it locally
     //   "clipboard-read" the editor's Paste: host reads the Win32
     //                     clipboard, replies via pound.setClipboardText
+    //   "link\n<href>"    a link click in the rendered pane: web links
+    //                     open in the browser, file targets in a new
+    //                     Pound window (which explains a miss itself)
     //   "edit\n<text>"   the (debounced) editor buffer changed
     let ipc_presenter = shared.clone();
     let ipc_dirty = dirty.clone();
@@ -260,6 +263,41 @@ pub fn run(file: Option<PathBuf>) {
             // A non-text clipboard simply yields no reply: Paste no-ops.
             if let Some(text) = crate::clipboard::read_text() {
                 *ipc_clipboard_reply.lock().unwrap() = Some(text);
+            }
+        } else if let Some(href) = body.strip_prefix("link\n") {
+            // The shell intercepts link clicks (the browser resolves
+            // hrefs against about:blank, mangling them before any
+            // navigation handler could see them).
+            match link_action(href, false) {
+                LinkAction::OpenExternally => {
+                    if let Err(e) = open::that(href) {
+                        let message = format!("could not open {href}: {e}");
+                        ipc_presenter.borrow_mut().model.error = Some(message);
+                        ipc_dirty.set(true);
+                    }
+                }
+                LinkAction::Refuse => {
+                    // A local-file target: open it in a new Pound window,
+                    // VSCode-style — a missing file shows its own error
+                    // banner there instead of trapping this window.
+                    let target = ipc_presenter.borrow().link_target(href);
+                    if let Some(path) = target {
+                        // A detached child: dropping the handle does not
+                        // kill the process, so the window outlives us.
+                        let spawned = std::env::current_exe()
+                            .and_then(|exe| std::process::Command::new(exe).arg(&path).spawn());
+                        if let Err(e) = spawned {
+                            let message =
+                                format!("could not open a new window for {}: {e}", path.display());
+                            ipc_presenter.borrow_mut().model.error = Some(message);
+                            ipc_dirty.set(true);
+                        }
+                    }
+                }
+                LinkAction::Stay | LinkAction::Internal => {
+                    // Anchors scroll in the shell; pound:// controls still
+                    // travel through the navigation handler.
+                }
             }
         } else if let Some(text) = body.strip_prefix("edit\n") {
             ipc_presenter.borrow_mut().edit_source(text);
@@ -1312,6 +1350,27 @@ const SHELL_HTML: &str = r#"<!doctype html>
       e.preventDefault();
       document.execCommand('insertText', false, '    ');
     }
+  });
+
+  // ---- links in the rendered pane ---------------------------------------
+  // Clicks never navigate the reader (the browser resolves hrefs against
+  // about:blank, mangling them beyond repair): the raw href goes to the
+  // host, which opens web links externally and file targets in a new
+  // Pound window. In-page anchors scroll within the document.
+  document.getElementById('content').addEventListener('click', e => {
+    const a = e.target.closest('a');
+    if (!a) return;
+    e.preventDefault();
+    const href = a.getAttribute('href');
+    if (!href) return; // sanitizer-stripped href: nothing to open
+    if (href.startsWith('#')) {
+      try {
+        document.getElementById(decodeURIComponent(href.slice(1)))
+                ?.scrollIntoView({ behavior: 'smooth' });
+      } catch (_) { /* a malformed anchor id scrolls nowhere */ }
+      return;
+    }
+    hostSend('link\n' + href);
   });
 
   // ---- settings ---------------------------------------------------------

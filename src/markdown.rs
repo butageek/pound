@@ -278,7 +278,13 @@ fn percent_encode(path: &str) -> String {
 
 /// Decode a percent-encoded `poundimg` URI body back into a filesystem path.
 pub fn decode_poundimg_uri(uri: &str) -> Option<String> {
-    let body = uri.strip_prefix("poundimg://")?;
+    percent_decode(uri.strip_prefix("poundimg://")?)
+}
+
+/// Percent-decode a URL body (`%20` -> space). Invalid escapes pass
+/// through unchanged; input that is not valid UTF-8 after decoding
+/// yields `None` so callers can fall back.
+pub fn percent_decode(body: &str) -> Option<String> {
     let bytes = body.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -383,7 +389,9 @@ fn sanitize(raw: &str) -> String {
         .add_generic_attribute_prefixes(["data-"])
         // pulldown leaves remote images as-is and we rewrite local ones to
         // poundimg:// — both must survive the sanitizer's URL filter.
-        .add_url_schemes(["poundimg", "data"])
+        // `file:` link hrefs survive too: the host opens them in a new
+        // Pound window (see the link ipc), never a navigation.
+        .add_url_schemes(["poundimg", "data", "file"])
         .url_relative(ammonia::UrlRelative::PassThrough)
         .clean(raw)
         .to_string()
@@ -558,5 +566,16 @@ mod highlighting {
     fn fence_info_suffixes_are_ignored() {
         let html = to_html("```rust,ignore\nfn f() {}\n```\n", Path::new("/tmp"));
         assert!(html.contains(r#"<code class="language-rust">"#), "{html}");
+    }
+
+    #[test]
+    fn file_link_hrefs_survive_sanitization() {
+        // The host opens file: links in a new window; ammonia must keep
+        // the href (its default scheme filter would strip it).
+        let html = to_html("[doc](file:///C:/gone%20doc.md)\n", Path::new("/tmp"));
+        assert!(
+            html.contains(r#"href="file:///C:/gone%20doc.md""#),
+            "{html}"
+        );
     }
 }

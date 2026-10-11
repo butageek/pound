@@ -71,12 +71,20 @@ file types (CSV next). Architecture is strict MVP
   banner), intercepted by the navigation handler which calls presenter
   intents. There is deliberately no Open/Reload UI: files arrive by
   double-click, drag-and-drop or CLI, and on-disk edits auto-reload.
-  http(s)/mailto links are opened externally and never navigate the
-  reader. Every other navigation (`file:`, `data:`, `poundimg:`, relative
-  paths, unknown schemes) is refused with an error banner — the reader
-  has no back button, so the webview must never leave the shell
-  document (`presenter::link_action` classifies; only the initial load
-  and in-page `about:` anchors stay).
+- Links never navigate the reader (VSCode-style): the shell intercepts
+  clicks in `#content` and posts `link\n<raw href>` over ipc — the raw
+  href, because the browser resolves hrefs against `about:blank` and
+  mangles them before any navigation handler could see them
+  (`about:blank/rel.md` is a *different* blank document). The host
+  routes by `presenter::link_action`: web/mailto → external browser;
+  file targets (`file:` URLs, absolute or relative paths, resolved
+  against the document's directory by `Presenter::link_target` with
+  percent-decoding) → a **new Pound window** (`current_exe` spawn),
+  which reports a missing file in its own error banner; anchors scroll
+  in-page. The navigation handler remains as a safety net: only the
+  initial load and same-document `about:blank#…` anchors stay;
+  everything else is refused. ammonia allows the `file:` scheme on
+  hrefs for this path.
 - Drag & drop only reaches the host when a wry `with_drag_drop_handler`
   is registered — that's what makes wry set `AllowExternalDrop(false)`;
   without it the WebView2 page silently swallows drops (tao's
