@@ -115,6 +115,16 @@ file types (CSV next). Architecture is strict MVP
   follows live system changes while on Auto. Select changes apply
   locally and post `setting\n<name> <value>` (name: theme/light/dark) —
   the host only validates and persists (no push round-trip).
+- Fonts: the same Settings page picks the reading font (rendered prose)
+  and the editor font (source pane + code), offered from the installed
+  system families enumerated once via GDI (`fonts.rs`, injected as
+  `window.poundFonts`; the editor list is filtered to fixed-pitch
+  families). The shell only sets the `--reader-choice`/`--mono-choice`
+  variables; the fallback stacks live once in `:root`, which composes
+  them into `--reader-font`/`--mono-font`. Choices persist as
+  `ReaderFont`/`MonoFont` (free-form names; `""` = default), and a name
+  that is no longer installed falls back to the default — dropped at
+  load by the view, refused at save by the ipc handler.
 - Closing with unsaved changes: `CloseRequested` shows the shell's
   dialog via `pound.setClosePrompt(true)` instead of exiting. Its buttons
   post `save-and-exit` (the host saves first and only exits when the

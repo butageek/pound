@@ -99,10 +99,15 @@ pub fn save_setting(name: &str, value: &str) {
 /// version) fall back to the defaults per-field.
 pub fn load_settings() -> Settings {
     let get = |name: &str| load_setting(name).unwrap_or_default();
+    // Font settings are free-form names: empty means "default", and a
+    // name that is not installed anymore is dropped by the view.
+    let font = |name: &str| load_setting(name).filter(|v| !v.trim().is_empty());
     Settings {
         theme: Theme::parse(&get("Theme")).unwrap_or_default(),
         light: LightPalette::parse(&get("LightPalette")).unwrap_or_default(),
         dark: DarkPalette::parse(&get("DarkPalette")).unwrap_or_default(),
+        reader_font: font("ReaderFont"),
+        mono_font: font("MonoFont"),
     }
 }
 

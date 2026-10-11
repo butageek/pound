@@ -21,6 +21,7 @@ wry = "0.57"
 winreg = "0.55"
 windows-sys = { version = "0.60", features = [
     "Win32_UI_Shell",
+    "Win32_Graphics_Gdi",
     "Win32_System_Console",
     "Win32_System_DataExchange",
     "Win32_System_Memory",

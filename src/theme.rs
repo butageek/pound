@@ -90,6 +90,13 @@ pub struct Settings {
     pub theme: Theme,
     pub light: LightPalette,
     pub dark: DarkPalette,
+    /// Chosen reading font family; `None` = the default stack.
+    /// Persisted as `ReaderFont` (free-form; the view drops names that
+    /// are no longer installed).
+    pub reader_font: Option<String>,
+    /// Chosen editor (monospace) font family; `None` = the default
+    /// stack. Persisted as `MonoFont`.
+    pub mono_font: Option<String>,
 }
 
 #[cfg(test)]

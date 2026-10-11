@@ -26,23 +26,43 @@ use tao::event_loop::{ControlFlow, EventLoop};
 use tao::window::WindowBuilder;
 use wry::{http, DragDropEvent, WebView, WebViewBuilder, WebViewBuilderExtWindows};
 
+use crate::fonts::{self, FontFamilies};
 use crate::presenter::Presenter;
 use crate::register;
 use crate::theme::{DarkPalette, LightPalette, Settings, Theme};
 use crate::update;
-/// The shell with the persisted settings injected
-/// (`window.poundSettings`): the head script resolves the theme before
-/// first paint, so the app never flashes the wrong one.
-fn shell_html(settings: &Settings) -> String {
+/// The shell with the persisted settings and the installed font list
+/// injected (`window.poundSettings` / `window.poundFonts`): the head
+/// script resolves the theme and fonts before first paint, so the app
+/// never flashes the wrong ones.
+fn shell_html(settings: &Settings, fonts: &FontFamilies) -> String {
     const PLACEHOLDER: &str =
-        "window.poundSettings = { mode: 'auto', light: 'solarized', dark: 'one-dark' };";
-    let injected = format!(
-        "window.poundSettings = {{ mode: '{}', light: '{}', dark: '{}' }};",
+        "window.poundSettings = { mode: 'auto', light: 'solarized', dark: 'one-dark', reader: '', mono: '' };";
+    const FONTS_PLACEHOLDER: &str = "window.poundFonts = { reader: [], mono: [] };";
+    let font = |v: &Option<String>| match v {
+        Some(name) => json_str(name),
+        None => "''".to_owned(),
+    };
+    let settings_injected = format!(
+        "window.poundSettings = {{ mode: '{}', light: '{}', dark: '{}', reader: {}, mono: {} }};",
         settings.theme.as_str(),
         settings.light.as_str(),
-        settings.dark.as_str()
+        settings.dark.as_str(),
+        font(&settings.reader_font),
+        font(&settings.mono_font),
     );
-    SHELL_HTML.replace(PLACEHOLDER, &injected)
+    let list = |names: &[String]| {
+        let quoted: Vec<String> = names.iter().map(|n| json_str(n)).collect();
+        format!("[{}]", quoted.join(", "))
+    };
+    let fonts_injected = format!(
+        "window.poundFonts = {{ reader: {}, mono: {} }};",
+        list(&fonts.all),
+        list(&fonts.mono),
+    );
+    SHELL_HTML
+        .replace(PLACEHOLDER, &settings_injected)
+        .replace(FONTS_PLACEHOLDER, &fonts_injected)
 }
 
 /// How often to check the document for on-disk changes.
@@ -94,8 +114,23 @@ pub fn run(file: Option<PathBuf>) {
         });
     }
 
+    // Installed fonts: enumerated once, used to build the settings page
+    // lists, to validate persisted names (a font that was uninstalled
+    // falls back to the default) and to validate ipc saves below.
+    let fonts = fonts::families();
+    let mut settings = register::load_settings();
+    // `take().filter` keeps a persisted name only while it is installed.
+    settings.reader_font = settings
+        .reader_font
+        .take()
+        .filter(|name| fonts.all.iter().any(|f| f == name));
+    settings.mono_font = settings
+        .mono_font
+        .take()
+        .filter(|name| fonts.mono.iter().any(|f| f == name));
+
     let builder = WebViewBuilder::new()
-        .with_html(shell_html(&register::load_settings()))
+        .with_html(shell_html(&settings, &fonts))
         .with_devtools(cfg!(debug_assertions))
         .with_custom_protocol("poundimg".into(), |_id, request| serve_local_image(request))
         // Chromium's default right-click menu (Copy / Print / an empty
@@ -131,6 +166,8 @@ pub fn run(file: Option<PathBuf>) {
     let ipc_update_ui = show_update_progress.clone();
     let ipc_installer = Arc::clone(&installer);
     let ipc_clipboard_reply = Arc::clone(&clipboard_reply);
+    // Font lists for validating settings-page saves (see fonts::families).
+    let ipc_fonts = fonts.clone();
     let builder = builder.with_ipc_handler(move |request| {
         let body = request.body();
         // Spawn the installer and switch the toast to progress mode. The
@@ -209,10 +246,16 @@ pub fn run(file: Option<PathBuf>) {
         } else if let Some(setting) = body.strip_prefix("setting\n") {
             if let Some((name, value)) = setting.split_once(' ') {
                 // Validate before persisting; map to the registry value name.
+                // Fonts accept "" (back to the default stack) or any
+                // installed family; names are free-form and may contain
+                // spaces, which split_once keeps in the value.
+                let known = |list: &[String]| value.is_empty() || list.iter().any(|f| f == value);
                 let (valid, reg_name) = match name {
                     "theme" => (Theme::parse(value).is_some(), "Theme"),
                     "light" => (LightPalette::parse(value).is_some(), "LightPalette"),
                     "dark" => (DarkPalette::parse(value).is_some(), "DarkPalette"),
+                    "reader" => (known(&ipc_fonts.all), "ReaderFont"),
+                    "mono" => (known(&ipc_fonts.mono), "MonoFont"),
                     _ => (false, ""),
                 };
                 if valid {
@@ -585,6 +628,12 @@ const SHELL_HTML: &str = r#"<!doctype html>
     --link: #268bd2; --code-bg: rgba(147,161,161,0.18); --code-block-bg: #f3ecda;
     --th-bg: #eee8d5; --hover: rgba(147,161,161,0.15);
     --error-fg: #dc322f; --error-bg: rgba(220,50,47,0.08);
+    /* Font stacks. The settings page only sets the *-choice variable
+       inline when the user picks a family (see applyFonts); the var()
+       fallback plus the rest of the stack keep missing glyphs and
+       uninstalled names readable. */
+    --reader-font: var(--reader-choice, "Segoe UI"), "Segoe UI Variable Text", system-ui, sans-serif;
+    --mono-font: var(--mono-choice, Consolas), "Cascadia Mono", monospace;
   }
   :root[data-theme="latte"] {
     color-scheme: light;
@@ -768,7 +817,7 @@ const SHELL_HTML: &str = r#"<!doctype html>
     display: block; width: 100%; height: 100%; margin: 0;
     padding: 14px 18px 60px; border: 0; outline: none; resize: none;
     background: transparent; color: var(--text);
-    font: 12.5px/1.6 Consolas, "Cascadia Mono", monospace;
+    font: 12.5px/1.6 var(--mono-font);
     white-space: pre; tab-size: 4;
     overflow: auto; scrollbar-gutter: stable;
   }
@@ -794,13 +843,14 @@ const SHELL_HTML: &str = r#"<!doctype html>
   #welcome h1 { color: var(--text); font-size: 28px; margin: 0 0 4px; }
   #welcome code {
     background: var(--code-bg); border-radius: 5px; padding: 1px 5px;
-    font-family: Consolas, monospace; font-size: 12.5px;
+    font-family: var(--mono-font); font-size: 12.5px;
   }
 
   /* ---- markdown content (Solarized Light / One Dark palettes) ---- */
   #content {
     /* Full pane width like VSCode's preview (no centered reading column). */
     padding: 26px 40px 120px;
+    font-family: var(--reader-font);
     font-size: 15.5px; line-height: 1.65;
   }
   #content h1, #content h2, #content h3, #content h4, #content h5, #content h6 {
@@ -815,7 +865,7 @@ const SHELL_HTML: &str = r#"<!doctype html>
   #content a:hover { text-decoration: underline; }
   #content code {
     background: var(--code-bg); border-radius: 6px; padding: .2em .4em;
-    font-family: Consolas, "Cascadia Mono", monospace; font-size: 85%;
+    font-family: var(--mono-font); font-size: 85%;
   }
   #content pre {
     position: relative; background: var(--code-block-bg); border-radius: 6px;
@@ -846,7 +896,7 @@ const SHELL_HTML: &str = r#"<!doctype html>
   #content li:has(> input[type="checkbox"]) { list-style: none; margin-left: -1.2em; }
   #content input[type="checkbox"] { margin: 0 .6em 0 0; vertical-align: middle; }
   #content kbd {
-    font: 85% Consolas, monospace; border: 1px solid var(--border);
+    font: 85% var(--mono-font); border: 1px solid var(--border);
     border-radius: 4px; padding: 1px 5px; background: var(--code-block-bg);
   }
   #content del { color: var(--muted); }
@@ -855,8 +905,11 @@ const SHELL_HTML: &str = r#"<!doctype html>
   // Resolve the theme before first paint so the app never flashes the
   // wrong one: the host injects the persisted settings as
   // window.poundSettings (see shell_html in view.rs). Auto follows the
-  // system; each mode then uses its chosen palette.
-  window.poundSettings = { mode: 'auto', light: 'solarized', dark: 'one-dark' };
+  // system; each mode then uses its chosen palette. The chosen fonts are
+  // applied for the same reason (the body's applyFonts re-runs and owns
+  // the full logic).
+  window.poundSettings = { mode: 'auto', light: 'solarized', dark: 'one-dark', reader: '', mono: '' };
+  window.poundFonts = { reader: [], mono: [] };
   (function () {
     var s = window.poundSettings;
     var mode = s.mode;
@@ -864,6 +917,14 @@ const SHELL_HTML: &str = r#"<!doctype html>
       mode = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
     }
     document.documentElement.dataset.theme = mode === 'dark' ? s.dark : s.light;
+    // Only the family choice is set here; the fallback stacks live once
+    // in the :root CSS (--reader-font / --mono-font compose it).
+    if (s.reader) {
+      document.documentElement.style.setProperty('--reader-choice', '"' + s.reader + '"');
+    }
+    if (s.mono) {
+      document.documentElement.style.setProperty('--mono-choice', '"' + s.mono + '"');
+    }
   })();
 </script>
 </head>
@@ -946,6 +1007,18 @@ const SHELL_HTML: &str = r#"<!doctype html>
         <select id="setting-dark">
           <option value="one-dark">One Dark</option>
           <option value="mocha">Catppuccin Mocha</option>
+        </select>
+      </div>
+      <div class="setting-row">
+        <label for="setting-reader">Reading font</label>
+        <select id="setting-reader">
+          <option value="">System default</option>
+        </select>
+      </div>
+      <div class="setting-row">
+        <label for="setting-mono">Editor font</label>
+        <select id="setting-mono">
+          <option value="">System default</option>
         </select>
       </div>
       <div class="dialog-actions">
@@ -1180,12 +1253,26 @@ const SHELL_HTML: &str = r#"<!doctype html>
   });
 
   // ---- settings ---------------------------------------------------------
-  // Theme mode + one palette per mode (Zed-style). Every change applies
-  // live and is persisted by the host; there is no OK/Cancel by design.
+  // Theme mode + one palette per mode (Zed-style), plus the reading and
+  // editor fonts from the installed families (window.poundFonts). Every
+  // change applies live and is persisted by the host; there is no
+  // OK/Cancel by design.
   const settings = Object.assign(
-    { mode: 'auto', light: 'solarized', dark: 'one-dark' },
+    { mode: 'auto', light: 'solarized', dark: 'one-dark', reader: '', mono: '' },
     window.poundSettings
   );
+  // applyFonts sets or clears the *-choice variables; the fallback
+  // stacks live once, in the :root CSS that composes them.
+  const quote = name => '"' + name.replace(/"/g, '\\"') + '"';
+  function applyFonts() {
+    const style = document.documentElement.style;
+    const apply = (choice, name) =>
+      name
+        ? style.setProperty(choice, quote(name))
+        : style.removeProperty(choice);
+    apply('--reader-choice', settings.reader);
+    apply('--mono-choice', settings.mono);
+  }
   function applyTheme() {
     let mode = settings.mode;
     if (mode === 'auto') {
@@ -1199,12 +1286,32 @@ const SHELL_HTML: &str = r#"<!doctype html>
     select.onchange = () => {
       settings[key] = select.value;
       applyTheme();
+      applyFonts();
       hostSend('setting\n' + name + ' ' + select.value);
     };
   };
   bindSetting('setting-mode', 'mode', 'theme');
   bindSetting('setting-light', 'light', 'light');
   bindSetting('setting-dark', 'dark', 'dark');
+  bindSetting('setting-reader', 'reader', 'reader');
+  bindSetting('setting-mono', 'mono', 'mono');
+  // Fill the two font selects from the host's enumeration; each option
+  // previews in its own family, and a persisted-but-uninstalled font
+  // (the host already dropped it from poundSettings) shows as default.
+  const fillFontSelect = (id, key, list) => {
+    const select = document.getElementById(id);
+    for (const name of list) {
+      const opt = document.createElement('option');
+      opt.value = opt.textContent = name;
+      opt.style.fontFamily = quote(name);
+      select.appendChild(opt);
+    }
+    // Re-select after the options exist (a missing name falls back to
+    // the "System default" option, value '').
+    select.value = settings[key];
+  };
+  fillFontSelect('setting-reader', 'reader', window.poundFonts.reader);
+  fillFontSelect('setting-mono', 'mono', window.poundFonts.mono);
 
   const settingsDialog = document.getElementById('settings');
   const hideSettings = () => (settingsDialog.style.display = 'none');

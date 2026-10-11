@@ -16,6 +16,8 @@ mod cli;
 #[cfg(windows)]
 mod clipboard;
 #[cfg(any(windows, test))]
+mod fonts;
+#[cfg(any(windows, test))]
 mod markdown;
 #[cfg(any(windows, test))]
 mod model;
