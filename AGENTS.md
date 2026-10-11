@@ -121,13 +121,15 @@ file types (CSV next). Architecture is strict MVP
   (`fonts.rs`, injected as the flat `window.poundFonts` array). The
   shell only sets the `--reader-choice`/`--mono-choice` variables; the
   fallback stacks live once in `:root`, which composes them into
-  `--reader-font`/`--mono-font`. The **Size** row sets one px size for
-  both panes (`--font-size`; the closed set `FONT_SIZES` in `theme.rs`,
-  default 15.5). The typeface persists as `Font` (`""` = default; an
-  absent value falls back to v0.10.0's `ReaderFont`/`MonoFont`), the
-  size as `FontSize`; a typeface that is no longer installed falls
-  back to the default — dropped at load by the view, refused at save by
-  the ipc handler.
+  `--reader-font`/`--mono-font`. The **Size** row is a slider (10–28 px,
+  0.5 steps; the range lives in `theme.rs` `MIN`/`MAX_FONT_SIZE`,
+  default 15.5) setting one px size for both panes (`--font-size`). The
+  typeface persists as `Font` (`""` = default; an absent value falls
+  back to v0.10.0's `ReaderFont`/`MonoFont`), the size as `FontSize`;
+  a typeface that is no longer installed falls back to the default —
+  dropped at load by the view, refused at save by the ipc handler. A
+  size outside the slider's range is refused too — a 0 size once hid
+  every glyph (v0.11.0), so the shell also ignores non-positive sizes.
 - Closing with unsaved changes: `CloseRequested` shows the shell's
   dialog via `pound.setClosePrompt(true)` instead of exiting. Its buttons
   post `save-and-exit` (the host saves first and only exits when the

@@ -84,16 +84,17 @@ impl DarkPalette {
 }
 
 /// The reading font size (px) shared by the rendered and source panes.
-/// A closed set — the Settings select offers exactly these — persisted
-/// as `FontSize`; anything else falls back to the default.
-pub const FONT_SIZES: [f32; 5] = [12.0, 13.5, 15.5, 17.5, 20.0];
+/// The Settings slider offers anything in this range (0.5 steps);
+/// persisted as `FontSize`, anything outside falls back to the default.
+pub const MIN_FONT_SIZE: f32 = 10.0;
+pub const MAX_FONT_SIZE: f32 = 28.0;
 pub const DEFAULT_FONT_SIZE: f32 = 15.5;
 
-/// Parse a persisted size (the select's value, e.g. "15.5"); `None`
-/// unless it is one of `FONT_SIZES`.
+/// Parse a persisted size (the slider's value, e.g. "15.5"); `None`
+/// unless it is within `MIN_FONT_SIZE..=MAX_FONT_SIZE`.
 pub fn parse_font_size(value: &str) -> Option<f32> {
     let px = value.trim().parse::<f32>().ok()?;
-    FONT_SIZES.contains(&px).then_some(px)
+    (MIN_FONT_SIZE..=MAX_FONT_SIZE).contains(&px).then_some(px)
 }
 
 /// All persisted appearance settings, injected into the shell before
@@ -151,16 +152,17 @@ mod tests {
 
     #[test]
     fn font_size_values_round_trip() {
-        for size in FONT_SIZES {
+        for size in [MIN_FONT_SIZE, 13.5, DEFAULT_FONT_SIZE, 20.0, MAX_FONT_SIZE] {
             assert_eq!(parse_font_size(&size.to_string()), Some(size));
         }
         assert_eq!(Settings::default().font_size, DEFAULT_FONT_SIZE);
     }
 
     #[test]
-    fn unknown_font_sizes_do_not_parse() {
-        assert_eq!(parse_font_size("15"), None); // 15.5 is the default, not 15
-        assert_eq!(parse_font_size("0"), None);
+    fn out_of_range_font_sizes_do_not_parse() {
+        assert_eq!(parse_font_size("9.5"), None); // just below the slider
+        assert_eq!(parse_font_size("28.5"), None); // just above it
+        assert_eq!(parse_font_size("0"), None); // the v0.11.0 invisible-text bug
         assert_eq!(parse_font_size("garbage"), None);
         assert_eq!(parse_font_size(""), None);
     }

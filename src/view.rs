@@ -736,6 +736,16 @@ const SHELL_HTML: &str = r#"<!doctype html>
   }
   #settings .setting-group:first-of-type { margin-top: 10px; }
   #settings label { font-size: 13px; }
+  /* The size slider: thumb tracks the theme's link color; the readout is
+     fixed-width so dragging does not make it dance. */
+  #settings input[type="range"] {
+    accent-color: var(--link); width: 130px; cursor: pointer;
+  }
+  #settings .size-control {
+    display: flex; align-items: center; gap: 10px;
+    font: 12px Consolas, monospace; color: var(--muted);
+  }
+  #settings .size-control span { min-width: 52px; text-align: right; }
   #settings select {
     font: 13px "Segoe UI", system-ui, sans-serif; color: var(--text);
     background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
@@ -1023,13 +1033,10 @@ const SHELL_HTML: &str = r#"<!doctype html>
       </div>
       <div class="setting-row">
         <label for="setting-size">Size</label>
-        <select id="setting-size">
-          <option value="12">12 px</option>
-          <option value="13.5">13.5 px</option>
-          <option value="15.5">15.5 px (default)</option>
-          <option value="17.5">17.5 px</option>
-          <option value="20">20 px</option>
-        </select>
+        <span class="size-control">
+          <input type="range" id="setting-size" min="10" max="28" step="0.5" value="15.5">
+          <span id="setting-size-value">15.5 px</span>
+        </span>
       </div>
       <div class="dialog-actions">
         <button id="settings-close" class="primary" type="button">Close</button>
@@ -1283,8 +1290,8 @@ const SHELL_HTML: &str = r#"<!doctype html>
     apply('--reader-choice', settings.font);
     apply('--mono-choice', settings.font);
   }
-  // One size for both panes — they were hardcoded to mismatched sizes
-  // (12.5px source vs 15.5px rendered) before this setting existed.
+  // One px size shared by both panes (they were hardcoded to mismatched
+  // sizes — 12.5px source vs 15.5px rendered — before this setting).
   const applyFontSize = () =>
     document.documentElement.style.setProperty('--font-size', settings.size + 'px');
   function applyTheme() {
@@ -1301,7 +1308,6 @@ const SHELL_HTML: &str = r#"<!doctype html>
       settings[key] = select.value;
       applyTheme();
       applyFonts();
-      applyFontSize();
       hostSend('setting\n' + name + ' ' + select.value);
     };
   };
@@ -1309,7 +1315,20 @@ const SHELL_HTML: &str = r#"<!doctype html>
   bindSetting('setting-light', 'light', 'light');
   bindSetting('setting-dark', 'dark', 'dark');
   bindSetting('setting-font', 'font', 'font');
-  bindSetting('setting-size', 'size', 'size');
+  // The slider applies live while dragging ('input' fires per step) and
+  // persists once on release ('change').
+  const sizeInput = document.getElementById('setting-size');
+  const sizeValue = document.getElementById('setting-size-value');
+  sizeInput.value = settings.size;
+  sizeValue.textContent = settings.size + ' px';
+  sizeInput.addEventListener('input', () => {
+    settings.size = sizeInput.value;
+    sizeValue.textContent = settings.size + ' px';
+    applyFontSize();
+  });
+  sizeInput.addEventListener('change', () => {
+    hostSend('setting\nsize ' + settings.size);
+  });
   // Fill the font select from the host's enumeration; each option
   // previews in its own family, and a persisted-but-uninstalled font
   // (the host already dropped it from poundSettings) shows as default.

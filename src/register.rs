@@ -19,7 +19,9 @@
 //!     FileAssociations\.md = Pound.md
 //! ```
 
-use crate::theme::{DarkPalette, LightPalette, Settings, Theme};
+use crate::theme::{
+    parse_font_size, DarkPalette, LightPalette, Settings, Theme, DEFAULT_FONT_SIZE,
+};
 use std::io;
 use std::path::PathBuf;
 
@@ -114,7 +116,10 @@ pub fn load_settings() -> Settings {
         theme: Theme::parse(&get("Theme")).unwrap_or_default(),
         light: LightPalette::parse(&get("LightPalette")).unwrap_or_default(),
         dark: DarkPalette::parse(&get("DarkPalette")).unwrap_or_default(),
-        font_size: crate::theme::parse_font_size(&get("FontSize")).unwrap_or_default(),
+        font_size: parse_font_size(&get("FontSize"))
+            // unwrap_or_default() would yield f32's 0.0 — invisible text,
+            // the v0.11.0 bug — so a missing/garbage value means default.
+            .unwrap_or(DEFAULT_FONT_SIZE),
         font,
     }
 }
