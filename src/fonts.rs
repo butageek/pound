@@ -107,6 +107,10 @@ mod tests {
         assert!(is_monospace(0x04));
     }
 
+    // The stub below is what non-Windows hosts see; on Windows the real
+    // enumeration returns the machine's fonts (and needs a desktop
+    // session), so this only runs off-Windows.
+    #[cfg(not(windows))]
     #[test]
     fn non_windows_lists_are_empty() {
         let fonts = families();
