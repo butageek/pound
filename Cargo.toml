@@ -14,6 +14,16 @@ categories = ["text-processing", "gui"]
 pulldown-cmark = "0.13"
 ammonia = "4"
 open = "5"
+# Classed-span highlighting (colors live in the shell CSS, so the
+# default themes dump is skipped); regex-fancy keeps the build pure
+# Rust — no oniguruma C dependency for the MSVC release host.
+syntect = { version = "5", default-features = false, features = [
+  "default-syntaxes",
+  "html",
+  "parsing",
+  "dump-load",
+  "regex-fancy",
+] }
 
 [target.'cfg(windows)'.dependencies]
 tao = "0.37"

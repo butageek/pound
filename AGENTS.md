@@ -51,6 +51,17 @@ file types (CSV next). Architecture is strict MVP
   baselines, code chips and tables are an endless whack-a-mole).
 - Guiding principle: "the file's bytes are the truth; rendering is a
   layer; when rendering fails, fall back to source, never eat content."
+- **Syntax highlighting** happens in `markdown.rs` at render time:
+  fenced blocks with a language syntect knows are highlighted into
+  classed spans (`<span class="storage type …">`, `highlight_codeblocks`
+  + syntect's `ClassedHTMLGenerator`, `ClassStyle::Spaced`); the colors
+  live in the shell CSS (`--syn-*` vars per palette) so no colors are
+  baked into the HTML and every palette themes code. Unknown languages,
+  plain fences and indented blocks replay pulldown's plain escaped
+  events (ammonia keeps sanitizing: `span`/`code` may carry only
+  `class`). The fence info string's first token is the language
+  (```rust,ignore → rust). syntect is built with `regex-fancy` (pure
+  Rust, no oniguruma) and without the default themes dump.
 - Rust → JS: `push_document` evaluates `pound.setContent(html, source,
   title, path, status)` + `pound.setError(msg)` — strings JSON-escaped by
   `json_str` (quoting only; XSS is handled by ammonia). `status` feeds the

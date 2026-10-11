@@ -14,8 +14,11 @@
 //!   HTML, and file content must never execute in the reader
 
 use std::path::Path;
+use std::sync::OnceLock;
 
-use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag};
+use pulldown_cmark::{html, CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd};
+use syntect::html::{ClassStyle, ClassedHTMLGenerator};
+use syntect::parsing::SyntaxSet;
 
 /// Render markdown source to sanitized HTML, resolving image references
 /// against `base_dir` (the document's directory).
@@ -30,7 +33,11 @@ pub fn to_html(source: &str, base_dir: &Path) -> String {
         .map(|(event, range)| (localize_image_event(event, base_dir), range));
 
     let mut raw = String::new();
-    push_blocks(&mut raw, events, &line_start_offsets(source));
+    push_blocks(
+        &mut raw,
+        highlight_codeblocks(events),
+        &line_start_offsets(source),
+    );
     sanitize(&raw)
 }
 
@@ -56,6 +63,108 @@ fn localize_image_event<'a>(event: Event<'a>, base_dir: &Path) -> Event<'a> {
     }
 }
 
+/// A code block while being buffered: its original events (the replay
+/// path), the accumulated plain text, and the fenced language token.
+type BufferedBlock<'a> = (
+    Vec<(Event<'a>, std::ops::Range<usize>)>,
+    String,
+    Option<String>,
+);
+
+/// Replace fenced code blocks carrying a known language with syntect
+/// classed spans (`<span class="keyword …">`) — the shell CSS colors
+/// them per palette, so no colors are baked into the HTML. Blocks the
+/// highlighter declines (no language, unknown language, errors) replay
+/// their original events and keep pulldown's plain escaped rendering.
+fn highlight_codeblocks<'a, I>(
+    events: I,
+) -> impl Iterator<Item = (Event<'a>, std::ops::Range<usize>)>
+where
+    I: Iterator<Item = (Event<'a>, std::ops::Range<usize>)>,
+{
+    let mut block: Option<BufferedBlock<'a>> = None;
+    let mut out: Vec<(Event<'a>, std::ops::Range<usize>)> = Vec::new();
+    for (event, range) in events {
+        let end = range.end;
+        match &event {
+            Event::Start(Tag::CodeBlock(kind)) if block.is_none() => {
+                let language = match kind {
+                    CodeBlockKind::Fenced(info) => first_token(info),
+                    CodeBlockKind::Indented => None,
+                };
+                block = Some((vec![(event, range)], String::new(), language));
+            }
+            Event::End(TagEnd::CodeBlock) if block.is_some() => {
+                let (mut events, code, language) = block.take().unwrap();
+                events.push((event, range));
+                let start = events[0].1.start;
+                match language.as_deref().and_then(|l| highlighted(&code, l)) {
+                    Some(html) => out.push((Event::Html(CowStr::from(html)), start..end)),
+                    None => out.extend(events),
+                }
+            }
+            Event::Text(text) if block.is_some() => {
+                let (events, code, _) = block.as_mut().unwrap();
+                code.push_str(text);
+                events.push((event, range));
+            }
+            _ if block.is_some() => block.as_mut().unwrap().0.push((event, range)),
+            _ => out.push((event, range)),
+        }
+    }
+    out.into_iter()
+}
+
+/// The first token of a fence info string ("```rust,ignore" -> "rust");
+/// `None` for an empty info string.
+fn first_token(info: &str) -> Option<String> {
+    info.split([',', ' ', ';', '\t', ':'])
+        .find(|token| !token.is_empty())
+        .map(str::to_owned)
+}
+
+/// Syntect's packed default syntaxes, parsed once per process.
+fn syntax_set() -> &'static SyntaxSet {
+    static SET: OnceLock<SyntaxSet> = OnceLock::new();
+    SET.get_or_init(SyntaxSet::load_defaults_newlines)
+}
+
+/// Highlight `code` as `language` into classed spans; `None` when the
+/// language is unknown or syntect declines a line — callers then keep
+/// the plain rendering, never eating content.
+fn highlighted(code: &str, language: &str) -> Option<String> {
+    let syntaxes = syntax_set();
+    let syntax = syntaxes.find_syntax_by_token(language)?;
+    let mut generator =
+        ClassedHTMLGenerator::new_with_class_style(syntax, syntaxes, ClassStyle::Spaced);
+    for line in code.split_inclusive('\n') {
+        // The generator wants lines with their newline; a final line
+        // without one gets it added (and the added newline trimmed back
+        // below, so an unterminated block gains no blank line).
+        let terminated;
+        let line = if line.ends_with('\n') {
+            line
+        } else {
+            terminated = format!("{line}\n");
+            terminated.as_str()
+        };
+        generator
+            .parse_html_for_line_which_includes_newline(line)
+            .ok()?;
+    }
+    let mut html = generator.finalize();
+    if !code.ends_with('\n') {
+        html.truncate(html.strip_suffix('\n')?.len());
+    }
+    // The wrapper mirrors pulldown's plain rendering (`<pre><code
+    // class="language-x">`) so block styling and the copy button keep
+    // working; the token is attribute-escaped before it goes in a class.
+    let class = language.replace(['"', '<', '>', '&'], "");
+    Some(format!(
+        "<pre><code class=\"language-{class}\">{html}</code></pre>"
+    ))
+}
+
 /// Render the event stream as HTML, wrapping every top-level block in a
 /// div carrying its source line range (the view's scroll sync maps panes
 /// through these attributes).
@@ -68,14 +177,16 @@ where
     let mut block_start = 0usize;
     let mut block_end = 0usize;
     for (event, range) in events {
+        // A fresh block adopts the range of its first event, whatever
+        // kind it is: Start events for markdown constructs, a synthetic
+        // Html event for highlighted code blocks (both carry the block's
+        // full source span).
+        if block.is_empty() {
+            block_start = range.start;
+            block_end = range.end;
+        }
         match &event {
-            Event::Start(_) => {
-                if depth == 0 {
-                    block_start = range.start;
-                    block_end = range.end;
-                }
-                depth += 1;
-            }
+            Event::Start(_) => depth += 1,
             Event::End(_) => depth = depth.saturating_sub(1),
             _ => {}
         }
@@ -261,6 +372,11 @@ fn sanitize(raw: &str) -> String {
     ammonia::Builder::new()
         .tags(tags)
         .add_tag_attributes("input", ["type", "checked", "disabled"])
+        // Highlighting emits `<span class="keyword …">` inside code
+        // blocks; the class is inert (colors come from our CSS) and only
+        // ever cosmetic.
+        .add_tag_attributes("span", ["class"])
+        .add_tag_attributes("code", ["class"])
         // Ours: block line annotations for scroll sync (numbers only, read
         // back by the shell — inert even if a file ships its own data-*
         // attributes, since scripts never execute).
@@ -381,5 +497,66 @@ mod tests {
             decode_poundimg_uri(&format!("poundimg://{encoded}")).unwrap(),
             path
         );
+    }
+}
+
+/// Highlighting tests (kept in their own module: they exercise the
+/// syntect integration, not the pure pulldown pipeline above).
+#[cfg(test)]
+mod highlighting {
+    use super::*;
+
+    #[test]
+    fn fenced_code_blocks_get_classed_highlights() {
+        let html = to_html(
+            "```rust\nfn main() { let x = 42; }\n```\n",
+            Path::new("/tmp"),
+        );
+        assert!(html.contains(r#"<code class="language-rust">"#), "{html}");
+        assert!(
+            html.contains("storage type"),
+            "fn is a keyword span: {html}"
+        );
+        assert!(
+            html.contains("entity name function"),
+            "fn name span: {html}"
+        );
+        assert!(html.contains("constant numeric"), "number span: {html}");
+    }
+
+    #[test]
+    fn highlighted_code_is_still_sanitized() {
+        // Angles in code must arrive escaped — highlighted or not, file
+        // content is never raw HTML. (The tokens sit in separate spans,
+        // so `&lt;` and `script` are not contiguous.)
+        let html = to_html(
+            "```html\n<script>alert(1)</script>\n```\n",
+            Path::new("/tmp"),
+        );
+        assert!(!html.contains("<script"), "{html}");
+        assert!(html.contains("&lt;"), "the angle is escaped: {html}");
+        assert!(
+            html.contains(">script<"),
+            "script is inert span text: {html}"
+        );
+    }
+
+    #[test]
+    fn unknown_language_and_plain_fences_render_escaped() {
+        // Unknown fences keep the plain path: escaped text, no spans
+        // (pulldown still tags the class; harmless and pre-existing).
+        let html = to_html(
+            "```notalanguage\nx < 42\n```\n\n    indented < code\n",
+            Path::new("/tmp"),
+        );
+        assert!(html.contains("&lt; 42"), "{html}");
+        assert!(html.contains("&lt; code"), "{html}");
+        assert!(!html.contains("<span"), "{html}");
+    }
+
+    #[test]
+    fn fence_info_suffixes_are_ignored() {
+        let html = to_html("```rust,ignore\nfn f() {}\n```\n", Path::new("/tmp"));
+        assert!(html.contains(r#"<code class="language-rust">"#), "{html}");
     }
 }

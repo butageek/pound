@@ -619,6 +619,9 @@ const SHELL_HTML: &str = r#"<!doctype html>
     --link: #268bd2; --code-bg: rgba(147,161,161,0.18); --code-block-bg: #f3ecda;
     --th-bg: #eee8d5; --hover: rgba(147,161,161,0.15);
     --error-fg: #dc322f; --error-bg: rgba(220,50,47,0.08);
+    /* Code-block token colors (syntect classed spans; see --syn-* rules). */
+    --syn-keyword: #859900; --syn-string: #2aa198; --syn-comment: #93a1a1;
+    --syn-constant: #d33682; --syn-function: #268bd2; --syn-type: #b58900;
     /* Font stacks. The settings page only sets the *-choice variable
        inline when the user picks a family (see applyFonts); the var()
        fallback plus the rest of the stack keep missing glyphs and
@@ -636,6 +639,8 @@ const SHELL_HTML: &str = r#"<!doctype html>
     --link: #1e66f5; --code-bg: rgba(140,143,168,0.15); --code-block-bg: #e6e9ef;
     --th-bg: #e6e9ef; --hover: rgba(140,143,168,0.12);
     --error-fg: #d20f39; --error-bg: rgba(210,15,57,0.08);
+    --syn-keyword: #8839ef; --syn-string: #40a02f; --syn-comment: #8c8fa1;
+    --syn-constant: #fe640b; --syn-function: #1e66f5; --syn-type: #df8e1d;
   }
   :root[data-theme="one-dark"] {
     color-scheme: dark;
@@ -643,6 +648,8 @@ const SHELL_HTML: &str = r#"<!doctype html>
     --link: #61afef; --code-bg: rgba(171,178,191,0.15); --code-block-bg: #2c313a;
     --th-bg: #2c313a; --hover: rgba(171,178,191,0.12);
     --error-fg: #e06c75; --error-bg: rgba(224,108,117,0.12);
+    --syn-keyword: #c678dd; --syn-string: #98c379; --syn-comment: #5c6370;
+    --syn-constant: #d19a66; --syn-function: #61afef; --syn-type: #e5c07b;
   }
   :root[data-theme="mocha"] {
     color-scheme: dark;
@@ -650,6 +657,8 @@ const SHELL_HTML: &str = r#"<!doctype html>
     --link: #89b4fa; --code-bg: rgba(205,214,244,0.10); --code-block-bg: #181825;
     --th-bg: #181825; --hover: rgba(205,214,244,0.08);
     --error-fg: #f38ba8; --error-bg: rgba(243,139,168,0.12);
+    --syn-keyword: #cba6f7; --syn-string: #a6e3a1; --syn-comment: #6c7086;
+    --syn-constant: #fab387; --syn-function: #89b4fa; --syn-type: #f9e2af;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -884,6 +893,20 @@ const SHELL_HTML: &str = r#"<!doctype html>
     padding: 14px 16px; margin: 0 0 16px; overflow: auto; line-height: 1.45;
   }
   #content pre code { background: none; padding: 0; font-size: 85%; }
+  /* Syntax highlighting: syntect emits classed spans ("storage type",
+     "constant numeric", …); the per-palette --syn-* vars above color
+     them. Single-token selectors match any scope containing the token,
+     so .type comes first ("storage type" keywords keep the keyword
+     color) and function colors need token pairs — `meta function`
+     wraps whole function bodies and must not match. */
+  #content pre .type { color: var(--syn-type); }
+  #content pre .keyword, #content pre .storage { color: var(--syn-keyword); }
+  #content pre .string { color: var(--syn-string); }
+  #content pre .comment { color: var(--syn-comment); font-style: italic; }
+  #content pre .constant { color: var(--syn-constant); }
+  #content pre .entity.function,
+  #content pre .support.function,
+  #content pre .variable.function { color: var(--syn-function); }
   #content pre .copy-btn {
     position: absolute; top: 6px; right: 6px; opacity: 0;
     font: 11px "Segoe UI", sans-serif; color: var(--muted);
