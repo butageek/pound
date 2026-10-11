@@ -186,11 +186,23 @@ mod tests {
         std::fs::write(&doc, "# hi").unwrap();
         let presenter = Presenter::new(Some(&doc));
 
-        // Relative links resolve against the document; missing files are
-        // fine — the new window explains a miss itself.
+        // Relative links resolve against the document's directory; missing
+        // files are fine — the new window explains a miss itself. Expect
+        // the document's own (canonicalized) directory: temp dirs can
+        // arrive in 8.3 short form (RUNNER~1) while Document::load
+        // canonicalizes to the long form — string paths would differ.
+        let doc_dir = presenter
+            .model
+            .document
+            .as_ref()
+            .unwrap()
+            .path
+            .parent()
+            .unwrap()
+            .to_path_buf();
         assert_eq!(
             presenter.link_target("notes/gone.md"),
-            Some(dir.join("notes/gone.md"))
+            Some(doc_dir.join("notes/gone.md"))
         );
         // file: URLs decode and drop the leading slash before a drive.
         #[cfg(windows)]
