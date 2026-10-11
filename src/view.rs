@@ -27,7 +27,7 @@ use tao::window::WindowBuilder;
 use wry::{http, DragDropEvent, WebView, WebViewBuilder, WebViewBuilderExtWindows};
 
 use crate::fonts;
-use crate::presenter::Presenter;
+use crate::presenter::{link_action, LinkAction, Presenter};
 use crate::register;
 use crate::theme::{DarkPalette, LightPalette, Settings, Theme};
 use crate::update;
@@ -129,6 +129,9 @@ pub fn run(file: Option<PathBuf>) {
 
     let nav_presenter = shared.clone();
     let nav_dirty = dirty.clone();
+    // The navigation handler's first call is the shell document's own
+    // load — allowed whatever URL the platform reports (see link_action).
+    let nav_initial = Rc::new(Cell::new(true));
     // Startup handshake: the eager `push_document` below races WebView2's
     // `NavigateToString` commit — when it runs while the initial blank
     // document is still current, `pound` is undefined and the push is lost
@@ -279,7 +282,13 @@ pub fn run(file: Option<PathBuf>) {
     });
     let webview = builder
         .with_navigation_handler(move |url| {
-            handle_navigation(&url, &mut nav_presenter.borrow_mut(), &nav_dirty)
+            let initial_load = nav_initial.replace(false);
+            handle_navigation(
+                &url,
+                initial_load,
+                &mut nav_presenter.borrow_mut(),
+                &nav_dirty,
+            )
         })
         .build(&window)
         .expect("create webview");
@@ -401,31 +410,44 @@ pub fn run(file: Option<PathBuf>) {
     });
 }
 
-/// In-page controls navigate to `pound://…`; web links open externally.
-/// Everything else (the initial document, in-page anchors) is allowed.
-fn handle_navigation(url: &str, presenter: &mut Presenter, dirty: &Cell<bool>) -> bool {
-    if let Some(command) = url.strip_prefix("pound://") {
-        match command.split(['?', '#']).next().unwrap_or("") {
-            "dismiss-error" => {
-                presenter.dismiss_error();
+/// Decide one navigation: `pound://` controls run their intent, web
+/// links open externally, in-page anchors stay — everything else is
+/// refused with a message. The rules, and why the reader never
+/// navigates away from the shell document, live in [`link_action`]
+/// (`initial_load` allows the shell's own first load).
+fn handle_navigation(
+    url: &str,
+    initial_load: bool,
+    presenter: &mut Presenter,
+    dirty: &Cell<bool>,
+) -> bool {
+    match link_action(url, initial_load) {
+        LinkAction::Internal => {
+            if let Some(command) = url.strip_prefix("pound://") {
+                match command.split(['?', '#']).next().unwrap_or("") {
+                    "dismiss-error" => {
+                        presenter.dismiss_error();
+                        dirty.set(true);
+                    }
+                    _ => {}
+                }
+            }
+            false
+        }
+        LinkAction::OpenExternally => {
+            if let Err(e) = open::that(url) {
+                presenter.model.error = Some(format!("could not open {url}: {e}"));
                 dirty.set(true);
             }
-            _ => {}
+            false
         }
-        return false;
-    }
-
-    let lower = url.to_ascii_lowercase();
-    if lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:")
-    {
-        if let Err(e) = open::that(url) {
-            presenter.model.error = Some(format!("could not open {url}: {e}"));
+        LinkAction::Refuse => {
+            presenter.model.error = Some(format!("link cannot be opened in the reader: {url}"));
             dirty.set(true);
+            false
         }
-        return false; // never navigate the reader away
+        LinkAction::Stay => true,
     }
-
-    true
 }
 
 /// Serve a `poundimg://<percent-encoded absolute path>` request from disk.

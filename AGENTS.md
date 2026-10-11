@@ -71,7 +71,12 @@ file types (CSV next). Architecture is strict MVP
   banner), intercepted by the navigation handler which calls presenter
   intents. There is deliberately no Open/Reload UI: files arrive by
   double-click, drag-and-drop or CLI, and on-disk edits auto-reload.
-  http(s)/mailto links are opened externally and never navigate the reader.
+  http(s)/mailto links are opened externally and never navigate the
+  reader. Every other navigation (`file:`, `data:`, `poundimg:`, relative
+  paths, unknown schemes) is refused with an error banner — the reader
+  has no back button, so the webview must never leave the shell
+  document (`presenter::link_action` classifies; only the initial load
+  and in-page `about:` anchors stay).
 - Drag & drop only reaches the host when a wry `with_drag_drop_handler`
   is registered — that's what makes wry set `AllowExternalDrop(false)`;
   without it the WebView2 page silently swallows drops (tao's
