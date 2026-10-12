@@ -97,6 +97,17 @@ pub fn save_setting(name: &str, value: &str) {
     }
 }
 
+/// Whether Windows is in dark app mode — the Rust-side answer to the
+/// shell's `prefers-color-scheme` matchMedia, used to pick the
+/// pre-paint background while Auto. False when the key is missing
+/// (old Windows: light is the historical default).
+pub fn system_prefers_dark() -> bool {
+    RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize")
+        .and_then(|key| key.get_value::<u32, _>("AppsUseLightTheme"))
+        .is_ok_and(|apps_use_light| apps_use_light == 0)
+}
+
 /// The last window size in physical pixels, saved by the view on every
 /// resize (not while maximized). `None` when missing or nonsensical —
 /// a broken value must never produce an unusable window (the mins

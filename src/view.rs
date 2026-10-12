@@ -63,6 +63,29 @@ const POLL_INTERVAL: Duration = Duration::from_millis(800);
 
 pub fn run(file: Option<PathBuf>) {
     let event_loop = EventLoop::new();
+
+    // Installed fonts: enumerated once, used to build the settings page
+    // list, to validate the persisted name (a font that was uninstalled
+    // falls back to the default) and to validate ipc saves below.
+    let fonts = fonts::families();
+    let mut settings = register::load_settings();
+    // `take().filter` keeps the persisted name only while it is installed.
+    settings.font = settings
+        .font
+        .take()
+        .filter(|name| fonts.iter().any(|f| f == name));
+
+    // Pre-paint background: the window (Win32 erase brush) and the
+    // WebView2 surface both start in the theme's `--bg`, so dark themes
+    // never flash white at startup or exit. The shell corrects Auto
+    // live via matchMedia after paint.
+    let bg = settings.theme.resolved_background(
+        settings.light,
+        settings.dark,
+        register::system_prefers_dark(),
+    );
+    let background = (bg[0], bg[1], bg[2], 255);
+
     // Restore the last window size (saved on resize, see the Resized
     // handler in the event loop); physical pixels, because that is what
     // resize events report. Default 1120×760 logical for a first launch.
@@ -74,6 +97,7 @@ pub fn run(file: Option<PathBuf>) {
         .with_title("Pound")
         .with_inner_size(size)
         .with_min_inner_size(LogicalSize::new(560.0, 400.0))
+        .with_background_color(background)
         .with_window_icon(window_icon())
         .build(&event_loop)
         .expect("create window");
@@ -114,19 +138,11 @@ pub fn run(file: Option<PathBuf>) {
         });
     }
 
-    // Installed fonts: enumerated once, used to build the settings page
-    // list, to validate the persisted name (a font that was uninstalled
-    // falls back to the default) and to validate ipc saves below.
-    let fonts = fonts::families();
-    let mut settings = register::load_settings();
-    // `take().filter` keeps the persisted name only while it is installed.
-    settings.font = settings
-        .font
-        .take()
-        .filter(|name| fonts.iter().any(|f| f == name));
-
     let builder = WebViewBuilder::new()
         .with_html(shell_html(&settings, &fonts))
+        // Same pre-paint color as the window: the WebView2 surface must
+        // not show its default white before the shell paints either.
+        .with_background_color(background)
         .with_devtools(cfg!(debug_assertions))
         .with_custom_protocol("poundimg".into(), |_id, request| serve_local_image(request))
         // Chromium's default right-click menu (Copy / Print / an empty

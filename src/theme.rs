@@ -4,7 +4,7 @@
 //! `register::load_settings` / `register::save_setting`).
 
 /// The theme mode. Persisted as `Theme`.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub enum Theme {
     #[default]
     Auto,
@@ -29,11 +29,27 @@ impl Theme {
             _ => None,
         }
     }
+
+    /// The resolved background color for pre-paint surfaces (window and
+    /// WebView2, both set at build time): the chosen palette's `--bg`,
+    /// with Auto resolved against `system_dark` the way the shell's
+    /// `matchMedia` head script resolves it after paint.
+    pub fn resolved_background(
+        &self,
+        light: LightPalette,
+        dark: DarkPalette,
+        system_dark: bool,
+    ) -> [u8; 3] {
+        match (*self, system_dark) {
+            (Theme::Dark, _) | (Theme::Auto, true) => dark.background(),
+            (Theme::Light, _) | (Theme::Auto, false) => light.background(),
+        }
+    }
 }
 
 /// The palette used while the resolved mode is light.
 /// Persisted as `LightPalette`.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub enum LightPalette {
     #[default]
     Solarized,
@@ -55,11 +71,22 @@ impl LightPalette {
             _ => None,
         }
     }
+
+    /// The palette's `--bg` from the shell CSS, as RGB — used for the
+    /// window and WebView2 backgrounds before first paint (see
+    /// `view::run`), so dark themes never flash white. Keep in sync
+    /// with SHELL_HTML (pinned by `palette_backgrounds_match_the_css`).
+    pub fn background(&self) -> [u8; 3] {
+        match self {
+            LightPalette::Solarized => [0xfd, 0xf6, 0xe3],
+            LightPalette::Latte => [0xef, 0xf1, 0xf5],
+        }
+    }
 }
 
 /// The palette used while the resolved mode is dark.
 /// Persisted as `DarkPalette`.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub enum DarkPalette {
     #[default]
     OneDark,
@@ -79,6 +106,15 @@ impl DarkPalette {
             "one-dark" => Some(DarkPalette::OneDark),
             "mocha" => Some(DarkPalette::Mocha),
             _ => None,
+        }
+    }
+
+    /// The palette's `--bg` from the shell CSS, as RGB (see
+    /// `LightPalette::background`).
+    pub fn background(&self) -> [u8; 3] {
+        match self {
+            DarkPalette::OneDark => [0x28, 0x2c, 0x34],
+            DarkPalette::Mocha => [0x1e, 0x1e, 0x2e],
         }
     }
 }
@@ -127,6 +163,38 @@ impl Default for Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn palette_backgrounds_match_the_shell_css() {
+        // Pinned to the --bg values in SHELL_HTML; if a palette changes,
+        // update both — the pre-paint background must blend seamlessly.
+        assert_eq!(LightPalette::Solarized.background(), [0xfd, 0xf6, 0xe3]);
+        assert_eq!(LightPalette::Latte.background(), [0xef, 0xf1, 0xf5]);
+        assert_eq!(DarkPalette::OneDark.background(), [0x28, 0x2c, 0x34]);
+        assert_eq!(DarkPalette::Mocha.background(), [0x1e, 0x1e, 0x2e]);
+    }
+
+    #[test]
+    fn auto_resolves_the_pre_paint_background() {
+        let latte = LightPalette::Latte;
+        let mocha = DarkPalette::Mocha;
+        assert_eq!(
+            Theme::Light.resolved_background(latte, mocha, true),
+            latte.background()
+        );
+        assert_eq!(
+            Theme::Dark.resolved_background(latte, mocha, false),
+            mocha.background()
+        );
+        assert_eq!(
+            Theme::Auto.resolved_background(latte, mocha, true),
+            mocha.background()
+        );
+        assert_eq!(
+            Theme::Auto.resolved_background(latte, mocha, false),
+            latte.background()
+        );
+    }
 
     #[test]
     fn theme_values_round_trip() {

@@ -148,6 +148,12 @@ file types (CSV next). Architecture is strict MVP
   follows live system changes while on Auto. Select changes apply
   locally and post `setting\n<name> <value>` (name: theme/light/dark) —
   the host only validates and persists (no push round-trip).
+- No white flash on dark themes: the window (Win32 erase brush) AND the
+  WebView2 surface (`DefaultBackgroundColor`) are both created in the
+  resolved palette's `--bg` (`Theme::resolved_background` in `theme.rs`,
+  with Auto resolved Rust-side via `register::system_prefers_dark` —
+  the AppsUseLightTheme registry value). The values are pinned to the
+  CSS by test; the shell still corrects Auto live via `matchMedia`.
 - Fonts: the Settings page's **Font** group picks one typeface for
   every reading/editing surface (rendered prose, source pane, code)
   from the installed system families, enumerated once via GDI
