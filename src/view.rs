@@ -61,6 +61,19 @@ fn shell_html(settings: &Settings, fonts: &[String]) -> String {
 /// How often to check the document for on-disk changes.
 const POLL_INTERVAL: Duration = Duration::from_millis(800);
 
+/// The pre-paint background color for the window and the webview: the
+/// resolved palette's `--bg` as opaque RGBA. Computed from whatever
+/// settings are in effect — the persisted ones at startup, fresh ones
+/// after a settings-page change (see the `theme_changed` flag).
+fn theme_background_of(settings: &Settings) -> (u8, u8, u8, u8) {
+    let bg = settings.theme.resolved_background(
+        settings.light,
+        settings.dark,
+        register::system_prefers_dark(),
+    );
+    (bg[0], bg[1], bg[2], 255)
+}
+
 pub fn run(file: Option<PathBuf>) {
     let event_loop = EventLoop::new();
 
@@ -79,12 +92,7 @@ pub fn run(file: Option<PathBuf>) {
     // WebView2 surface both start in the theme's `--bg`, so dark themes
     // never flash white at startup or exit. The shell corrects Auto
     // live via matchMedia after paint.
-    let bg = settings.theme.resolved_background(
-        settings.light,
-        settings.dark,
-        register::system_prefers_dark(),
-    );
-    let background = (bg[0], bg[1], bg[2], 255);
+    let background = theme_background_of(&settings);
 
     // Restore the last window size (saved on resize, see the Resized
     // handler in the event loop); physical pixels, because that is what
@@ -118,6 +126,11 @@ pub fn run(file: Option<PathBuf>) {
     let show_close_prompt = Rc::new(Cell::new(false));
     // Set by ipc when the toast must switch to progress mode (same reason).
     let show_update_progress = Rc::new(Cell::new(false));
+    // Set by ipc when a theme/palette change was persisted: the window
+    // and webview pre-paint backgrounds must follow, so closing never
+    // flashes the startup theme's color (applied in MainEventsCleared —
+    // the ipc handler cannot touch the window).
+    let theme_changed = Rc::new(Cell::new(false));
     // The running installer's streamed progress (see update::InstallerRun).
     // Shared with the ipc handler, which spawns it.
     let installer: Arc<update::InstallerSlot> = Arc::new(Mutex::new(None));
@@ -167,8 +180,10 @@ pub fn run(file: Option<PathBuf>) {
     //   "exit"           the close prompt's Don't save: exit now
     //   "update"         the update toast's Update & restart
     //   "cancel-exit"    the close prompt's Cancel (clears pending update)
-    //   "setting\n<n> <v>" a settings-page change: validated, persisted;
-    //                     the shell already applied it locally
+    //   "setting\n<n> <v>" a settings-page change: validated, persisted
+    //                     (the shell already applied it locally);
+    //                     theme/palette ones also repaint the window
+    //                     background (via the theme_changed flag)
     //   "clipboard-read" the editor's Paste: host reads the Win32
     //                     clipboard, replies via pound.setClipboardText
     //   "link\n<href>"    a link click in the rendered pane: web links
@@ -184,6 +199,7 @@ pub fn run(file: Option<PathBuf>) {
     let ipc_update_ui = show_update_progress.clone();
     let ipc_installer = Arc::clone(&installer);
     let ipc_clipboard_reply = Arc::clone(&clipboard_reply);
+    let ipc_theme_changed = theme_changed.clone();
     // Font list for validating settings-page saves (see fonts::families).
     let ipc_fonts = fonts.clone();
     let builder = builder.with_ipc_handler(move |request| {
@@ -280,6 +296,11 @@ pub fn run(file: Option<PathBuf>) {
                 };
                 if valid {
                     register::save_setting(reg_name, value);
+                    // Theme/palette changes must also repaint the
+                    // pre-paint backgrounds (see the theme_changed flag).
+                    if matches!(name, "theme" | "light" | "dark") {
+                        ipc_theme_changed.set(true);
+                    }
                 }
             }
         } else if body == "clipboard-read" {
@@ -406,6 +427,17 @@ pub fn run(file: Option<PathBuf>) {
                 }
                 if show_close_prompt.replace(false) {
                     eval_script(&webview, "pound.setClosePrompt(true);".to_owned());
+                }
+                // A theme/palette change was persisted: follow it with the
+                // pre-paint colors so closing the app never flashes the
+                // startup theme. Settings are re-read fresh (the ipc
+                // handler has already persisted them).
+                if theme_changed.replace(false) {
+                    let background = theme_background_of(&register::load_settings());
+                    window.set_background_color(Some(background));
+                    // Best-effort: the painted shell covers this surface;
+                    // the window brush above is the load-bearing one.
+                    let _ = webview.set_background_color(background);
                 }
                 // Deliver clipboard text requested by the editor's Paste.
                 if let Some(text) = clipboard_reply.lock().unwrap().take() {

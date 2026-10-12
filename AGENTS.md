@@ -154,6 +154,10 @@ file types (CSV next). Architecture is strict MVP
   with Auto resolved Rust-side via `register::system_prefers_dark` —
   the AppsUseLightTheme registry value). The values are pinned to the
   CSS by test; the shell still corrects Auto live via `matchMedia`.
+  A settings-page theme/palette change sets the `theme_changed` flag;
+  the event loop then live-updates both surfaces
+  (`window.set_background_color` + `webview.set_background_color`), so
+  closing never flashes the theme the app STARTED in.
 - Fonts: the Settings page's **Font** group picks one typeface for
   every reading/editing surface (rendered prose, source pane, code)
   from the installed system families, enumerated once via GDI
