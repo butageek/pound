@@ -1,0 +1,35 @@
+# Manual test builds: dispatch from the CLI/Actions tab, download the
+# zip as a private, auth-gated artifact (no release, nothing public) —
+# the way to try a build on a real machine before tagging a release.
+#
+#   gh workflow run build-test.yml
+#   gh run download <id> -n pound-test-zip -D dist-test
+
+name: Test build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        # No `targets:` needed: windows-latest hosts are msvc already,
+        # and package.sh passes the triple explicitly.
+
+      - name: Unit tests
+        run: cargo test
+
+      - name: Build release zip (same packager as a real release)
+        shell: bash
+        run: ./scripts/package.sh
+
+      - name: Upload zip as artifact (private, auth-gated)
+        uses: actions/upload-artifact@v4
+        with:
+          name: pound-test-zip
+          retention-days: 7
+          path: dist/pound-*-win64.zip
