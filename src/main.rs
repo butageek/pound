@@ -4,6 +4,8 @@
 //! - [`model`]      : state (document, view mode, errors)
 //! - [`markdown`]   : rendering input (markdown source -> sanitized HTML)
 //! - [`presenter`]  : user intents / use-cases over the model
+//! - [`ipc`]        : the JS bridge (shell -> host messages, host -> shell
+//!   string encoding)
 //! - [`view`]       : WebView2 shell (tao + wry) showing the HTML with
 //!   VSCode-grade browser rendering
 
@@ -17,6 +19,8 @@ mod cli;
 mod clipboard;
 #[cfg(any(windows, test))]
 mod fonts;
+#[cfg(any(windows, test))]
+mod ipc;
 #[cfg(any(windows, test))]
 mod markdown;
 #[cfg(any(windows, test))]

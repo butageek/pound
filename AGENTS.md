@@ -18,8 +18,9 @@ file types (CSV next). Architecture is strict MVP
 |---|---|---|
 | Model | `src/model.rs` | state only, no UI types |
 | Rendering input | `src/markdown.rs` | pulldown-cmark → sanitized HTML, unit-tested headlessly |
-| Presenter | `src/presenter.rs` | intents/use-cases, owns the Model, no GUI types |
-| View | `src/view.rs` | WebView2 shell (tao + wry): shell HTML/CSS/JS, JS bridge; forwards intents to the presenter |
+| Presenter | `src/presenter.rs` | intents/use-cases; owns the Model behind a **private field** — the view mutates only via intents (`open_externally`, `refuse_link`, `fail`, …) and reads only via accessors (`html()`, `is_dirty()`, `revision()`, …), never `model.*` directly; no GUI types |
+| JS bridge | `src/ipc.rs` | the shell→host wire protocol (`ipc::Message`, `parse`) + host→shell string encoding (`json_str`); headless-tested |
+| View | `src/view.rs` | WebView2 shell (tao + wry): window + event loop, ipc dispatch; embeds the shell document (`src/shell.html` via `include_str!`) |
 | Windows glue | `src/register.rs` | HKCU registry: app-list registration + `.md` association |
 
 ## Environment
@@ -73,7 +74,9 @@ file types (CSV next). Architecture is strict MVP
   Rust, no oniguruma) and without the default themes dump.
 - Rust → JS: `push_document` evaluates `pound.setContent(html, source,
   title, path, status)` + `pound.setError(msg)` — strings JSON-escaped by
-  `json_str` (quoting only; XSS is handled by ammonia). `status` feeds the
+  `json_str` (quoting only; XSS is handled by ammonia). The wire protocol
+  itself — parsing the shell's ipc messages and encoding the host's
+  replies — lives in `src/ipc.rs` (`ipc::Message`), unit-tested headlessly. `status` feeds the
   bottom status bar (path + file type + char/line counts; `model.rs` strips
   the `\\?\` verbatim prefix `canonicalize` adds, so users see `C:\…`).
 - JS → Rust: in-page controls navigate to `pound://dismiss-error` (error
@@ -200,10 +203,12 @@ file types (CSV next). Architecture is strict MVP
   file content must never execute (scripts/handlers/styling stripped).
   `poundimg`/`data` URL schemes must be in ammonia's allowlist or image
   srcs silently vanish.
-- Shell HTML/CSS/JS lives in `SHELL_HTML` in `view.rs`. To preview/verify it
-  in a browser: `cargo test dump_rendered_sample -- --ignored`, then compose
-  `/tmp/pound-preview.html` from the shell const + the dumped content (see
-  git history for the recipe) and open it with agent-browser.
+- Shell HTML/CSS/JS lives in `src/shell.html`, embedded via `include_str!`
+  (`SHELL_HTML` in `view.rs`) — a real file, so editors and formatters
+  treat it as HTML. To preview/verify it in a browser: `cargo test
+  dump_rendered_sample -- --ignored`, then compose `/tmp/pound-preview.html`
+  from the shell file + the dumped content (see git history for the recipe)
+  and open it with agent-browser.
 
 
 ## Commands

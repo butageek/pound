@@ -52,8 +52,15 @@ pub fn link_action(url: &str, initial_load: bool) -> LinkAction {
     LinkAction::Refuse
 }
 
+/// Owns the [`Model`] and exposes the actions the view can request.
+/// Keeping this free of GUI types makes the logic unit-testable.
+///
+/// The model field is deliberately private: the view (and everything
+/// else outside this module) reaches state only through these intents
+/// and read accessors — the one-way street that keeps mutations in one
+/// place and the view dumb. The compiler enforces it.
 pub struct Presenter {
-    pub model: Model,
+    model: Model,
 }
 
 impl Presenter {
@@ -148,6 +155,137 @@ impl Presenter {
         };
         self.open_path(path);
     }
+
+    /// Open a web/mailto link in the system browser, recording a banner
+    /// error when the OS refuses it. Returns whether it opened (the
+    /// caller re-pushes the banner only on failure).
+    pub fn open_externally(&mut self, url: &str) -> bool {
+        match open::that(url) {
+            Ok(()) => true,
+            Err(e) => {
+                self.fail(format!("could not open {url}: {e}"));
+                false
+            }
+        }
+    }
+
+    /// Record that a link was refused — following it would strand the
+    /// reader on a blank page — so the banner explains the no-op.
+    pub fn refuse_link(&mut self, url: &str) {
+        self.fail(format!("link cannot be opened in the reader: {url}"));
+    }
+
+    /// Record a user-facing failure the view cannot handle itself
+    /// (updater spawns, new-window spawns).
+    pub fn fail(&mut self, message: String) {
+        self.model.error = Some(message);
+    }
+
+    // ---- read accessors: everything the render step pulls ----
+
+    /// Whether unsaved edits are in the buffer (drives the close prompt,
+    /// the `*` title prefix and the status bar).
+    pub fn is_dirty(&self) -> bool {
+        self.model.dirty
+    }
+
+    /// The document revision, bumped on every load and edit; the view
+    /// watches it to know when to re-push content.
+    pub fn revision(&self) -> u64 {
+        self.model.revision
+    }
+
+    /// The open document's path (the reopen-after-update target), or
+    /// `None` with no document.
+    pub fn document_path(&self) -> Option<PathBuf> {
+        self.model.document.as_ref().map(|doc| doc.path.clone())
+    }
+
+    /// The last user-facing error, or `""` when there is none.
+    pub fn error_text(&self) -> &str {
+        self.model.error.as_deref().unwrap_or("")
+    }
+
+    /// The rendered preview HTML; empty with no document or for
+    /// plain-text files (the source pane is the view).
+    pub fn html(&self) -> &str {
+        self.model
+            .document
+            .as_ref()
+            .map_or("", |doc| doc.html.as_str())
+    }
+
+    /// The editor buffer; empty with no document.
+    pub fn source(&self) -> &str {
+        self.model
+            .document
+            .as_ref()
+            .map_or("", |doc| doc.source.as_str())
+    }
+
+    /// The document's path as shown to users (status bar); empty with
+    /// no document.
+    pub fn display_path(&self) -> String {
+        self.model
+            .document
+            .as_ref()
+            .map_or_else(String::new, |doc| doc.path.display().to_string())
+    }
+
+    /// Whether the document renders nothing and shows the source pane
+    /// alone (non-markdown text files).
+    pub fn is_plain(&self) -> bool {
+        self.model
+            .document
+            .as_ref()
+            .is_some_and(|doc| doc.is_plain())
+    }
+
+    /// The window title: the document's name, `*`-prefixed while edits
+    /// are unsaved (the editor convention), or just `Pound`.
+    pub fn title(&self) -> String {
+        match &self.model.document {
+            Some(doc) if self.model.dirty => format!("*{} — Pound", doc.name()),
+            Some(doc) => format!("{} — Pound", doc.name()),
+            None => "Pound".to_owned(),
+        }
+    }
+
+    /// Status-bar text: file type, character and line counts, the edit
+    /// state, and the app version — e.g. `Markdown · 1,234 characters · 56
+    /// lines · edited · v0.4.0`.
+    pub fn status_text(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(doc) = &self.model.document {
+            parts.push(format!(
+                "{} · {} characters · {} lines",
+                doc.type_label(),
+                group_digits(doc.source.chars().count()),
+                group_digits(doc.source.lines().count())
+            ));
+        }
+        if self.model.dirty {
+            parts.push("edited".to_owned());
+        }
+        if self.model.stale {
+            parts.push("changed on disk".to_owned());
+        }
+        parts.push(format!("v{}", env!("CARGO_PKG_VERSION")));
+        parts.join(" · ")
+    }
+}
+
+/// Group digits in threes (1234567 -> 1,234,567).
+fn group_digits(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -291,5 +429,117 @@ mod tests {
         presenter.model.error = Some("boom".to_owned());
         presenter.dismiss_error();
         assert!(presenter.model.error.is_none());
+    }
+
+    #[test]
+    fn errors_route_through_the_presenter() {
+        let mut presenter = Presenter::new(None);
+        assert_eq!(presenter.error_text(), "");
+        presenter.fail("boom".to_owned());
+        assert_eq!(presenter.error_text(), "boom");
+        presenter.refuse_link("data:text/html,hi");
+        assert_eq!(
+            presenter.error_text(),
+            "link cannot be opened in the reader: data:text/html,hi"
+        );
+        presenter.dismiss_error();
+        assert_eq!(presenter.error_text(), "");
+    }
+
+    #[test]
+    fn titles_track_the_document_and_edit_state() {
+        let dir = std::env::temp_dir().join(format!("pound-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("titles.md");
+        std::fs::write(&path, "# hi").unwrap();
+
+        let mut presenter = Presenter::new(None);
+        assert_eq!(presenter.title(), "Pound");
+        presenter.open_path(&path);
+        assert_eq!(presenter.title(), "titles — Pound");
+        presenter.edit_source("# hi there");
+        assert_eq!(presenter.title(), "*titles — Pound");
+    }
+
+    #[test]
+    fn status_text_reports_counts_and_states() {
+        let dir = std::env::temp_dir().join(format!("pound-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("status.md");
+        std::fs::write(&path, "# hi\nbody").unwrap();
+        let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+
+        // No document: just the version.
+        let presenter = Presenter::new(None);
+        assert_eq!(presenter.status_text(), version);
+
+        let mut presenter = Presenter::new(Some(&path));
+        // "# hi\nbody": 9 characters, 2 lines.
+        assert_eq!(
+            presenter.status_text(),
+            format!("Markdown · 9 characters · 2 lines · {version}")
+        );
+
+        presenter.edit_source("# hi\nbody — more");
+        assert_eq!(
+            presenter.status_text(),
+            format!("Markdown · 16 characters · 2 lines · edited · {version}")
+        );
+
+        presenter.model.stale = true;
+        assert_eq!(
+            presenter.status_text(),
+            format!("Markdown · 16 characters · 2 lines · edited · changed on disk · {version}")
+        );
+    }
+
+    #[test]
+    fn view_accessors_expose_model_state() {
+        let dir = std::env::temp_dir().join(format!("pound-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("view.md");
+        std::fs::write(&path, "# hello").unwrap();
+
+        // No document: empty view state, nothing dirty.
+        let mut presenter = Presenter::new(None);
+        assert_eq!(presenter.html(), "");
+        assert_eq!(presenter.source(), "");
+        assert_eq!(presenter.display_path(), "");
+        assert!(!presenter.is_plain());
+        assert!(!presenter.is_dirty());
+        assert_eq!(presenter.revision(), 0);
+        assert_eq!(presenter.document_path(), None);
+
+        presenter.open_path(&path);
+        assert!(presenter.html().contains("<h1>"));
+        assert_eq!(presenter.source(), "# hello");
+        assert_eq!(presenter.revision(), 1);
+        assert!(!presenter.is_dirty());
+        assert!(!presenter.is_plain());
+        assert_eq!(
+            presenter.document_path().unwrap().file_name(),
+            Some(std::ffi::OsStr::new("view.md"))
+        );
+        assert!(presenter.display_path().ends_with("view.md"));
+
+        presenter.edit_source("# hello world");
+        assert!(presenter.is_dirty());
+        assert_eq!(presenter.revision(), 2);
+
+        // Plain-text files render nothing: source pane alone.
+        let txt = dir.join("view.txt");
+        std::fs::write(&txt, "just text").unwrap();
+        presenter.open_path(&txt);
+        assert_eq!(presenter.html(), "");
+        assert_eq!(presenter.source(), "just text");
+        assert!(presenter.is_plain());
+    }
+
+    #[test]
+    fn digits_group_in_threes() {
+        assert_eq!(group_digits(0), "0");
+        assert_eq!(group_digits(999), "999");
+        assert_eq!(group_digits(1000), "1,000");
+        assert_eq!(group_digits(1234567), "1,234,567");
     }
 }
