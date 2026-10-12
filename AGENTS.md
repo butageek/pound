@@ -163,6 +163,11 @@ file types (CSV next). Architecture is strict MVP
   dropped at load by the view, refused at save by the ipc handler. A
   size outside the slider's range is refused too — a 0 size once hid
   every glyph (v0.11.0), so the shell also ignores non-positive sizes.
+- Window size: remembered across launches — saved to
+  `WindowWidth`/`WindowHeight` (physical px) on every resize except
+  while maximized, restored at startup when sane (minimums mirror the
+  builder's), default 1120×760 logical otherwise
+  (`register::window_size` + the `Resized` handler in `view.rs`).
 - Closing with unsaved changes: `CloseRequested` shows the shell's
   dialog via `pound.setClosePrompt(true)` instead of exiting. Its buttons
   post `save-and-exit` (the host saves first and only exits when the

@@ -20,7 +20,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tao::dpi::LogicalSize;
+use tao::dpi::{LogicalSize, PhysicalSize, Size};
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoop};
 use tao::window::WindowBuilder;
@@ -63,9 +63,16 @@ const POLL_INTERVAL: Duration = Duration::from_millis(800);
 
 pub fn run(file: Option<PathBuf>) {
     let event_loop = EventLoop::new();
+    // Restore the last window size (saved on resize, see the Resized
+    // handler in the event loop); physical pixels, because that is what
+    // resize events report. Default 1120×760 logical for a first launch.
+    let size = match register::window_size() {
+        Some((width, height)) => Size::Physical(PhysicalSize::new(width, height)),
+        None => Size::Logical(LogicalSize::new(1120.0, 760.0)),
+    };
     let window = WindowBuilder::new()
         .with_title("Pound")
-        .with_inner_size(LogicalSize::new(1120.0, 760.0))
+        .with_inner_size(size)
         .with_min_inner_size(LogicalSize::new(560.0, 400.0))
         .with_window_icon(window_icon())
         .build(&event_loop)
@@ -361,6 +368,19 @@ pub fn run(file: Option<PathBuf>) {
                     eval_script(&webview, "pound.setClosePrompt(true);".to_owned());
                 } else {
                     *control_flow = ControlFlow::Exit;
+                }
+            }
+
+            Event::WindowEvent {
+                event: WindowEvent::Resized(size),
+                ..
+            } => {
+                // Remember the size so the next launch opens like this one.
+                // Skip maximized windows: the restore size is the one
+                // worth keeping (maximizing is not remembered itself).
+                if !window.is_maximized() {
+                    register::save_setting("WindowWidth", &size.width.to_string());
+                    register::save_setting("WindowHeight", &size.height.to_string());
                 }
             }
 

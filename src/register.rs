@@ -97,6 +97,17 @@ pub fn save_setting(name: &str, value: &str) {
     }
 }
 
+/// The last window size in physical pixels, saved by the view on every
+/// resize (not while maximized). `None` when missing or nonsensical —
+/// a broken value must never produce an unusable window (the mins
+/// mirror the builder's `with_min_inner_size`).
+pub fn window_size() -> Option<(u32, u32)> {
+    let width = load_setting("WindowWidth")?.parse::<u32>().ok()?;
+    let height = load_setting("WindowHeight")?.parse::<u32>().ok()?;
+    let sane = (560..=16384).contains(&width) && (400..=16384).contains(&height);
+    sane.then_some((width, height))
+}
+
 /// All appearance settings. Garbage values (e.g. written by a future
 /// version) fall back to the defaults per-field.
 pub fn load_settings() -> Settings {
