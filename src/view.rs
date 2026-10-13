@@ -636,7 +636,7 @@ fn push_document(webview: &WebView, presenter: &Presenter) {
             json_str(&presenter.display_path()),
             json_str(&presenter.status_text()),
             presenter.is_dirty(),
-            presenter.view_mode(),
+            json_str(presenter.view_mode()),
             json_str(presenter.error_text()),
         ),
     );
