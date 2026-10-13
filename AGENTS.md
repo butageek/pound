@@ -309,11 +309,15 @@ Windows cross-check).
 
 ## Windows integration notes (context for `register.rs`)
 
-- Everything is HKCU-only: ProgId `Pound.md`, `.md\OpenWithProgids`,
-  `Explorer\FileExts\.md\OpenWithProgids`, `RegisteredApplications` +
-  `Software\Pound\Capabilities` (this is what puts us in the system app
-  list), then `SHChangeNotify`.
-- `--default` sets the per-user `.md` class default. Explorer's `UserChoice`
+- Everything is HKCU-only: ProgIds `Pound.md` + `Pound.table`, and for
+  every openable extension (`.md`, `.csv`, `.tsv`) an `OpenWithProgids`
+  entry, an `Explorer\FileExts\<ext>\OpenWithProgids` entry,
+  `RegisteredApplications` + `Software\Pound\Capabilities` (this is
+  what puts us in the system app list and the per-extension "Open with"
+  lists), then `SHChangeNotify`.
+- `--default` sets the per-user `.md` class default (only `.md`: a flag
+  that also claimed the data formats would decide a preference the user
+  never expressed). Explorer's `UserChoice`
   is hash-protected by Windows — no third-party app may set it silently;
   if the "choose an app" dialog still appears, the user picks Pound once
   with "Always". Platform restriction, not a bug.

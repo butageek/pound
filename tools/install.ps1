@@ -265,7 +265,7 @@ else {
     Write-Host 'Pound installed.' -ForegroundColor Green
 }
 if (-not $NoRegister -and -not $SetDefault) {
-    Write-Host 'Next: right-click a .md file > "Open with" > choose Pound (tick "Always").'
+    Write-Host 'Next: right-click a .md or .csv file > "Open with" > choose Pound (tick "Always").'
     Write-Host '      Or re-run the installer with -SetDefault.'
 }
 if ($NoPath) {
@@ -277,10 +277,12 @@ else {
 
 if ($Relaunch) {
     Write-Step 'Relaunching Pound'
-    if ($OpenPath -ne '') {
-        Start-Process -FilePath $targetExe -ArgumentList ('"' + $OpenPath + '"')
-    }
-    else {
-        Start-Process -FilePath $targetExe
-    }
+    # ProcessStartInfo.Arguments is the RAW command line. Start-Process
+    # re-quotes -ArgumentList elements and eats pre-embedded quotes,
+    # so a quoted path arrived as literal `"...`"` characters and pound
+    # relaunched without its file. The .NET API passes it through.
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $targetExe
+    if ($OpenPath -ne '') { $psi.Arguments = '"' + $OpenPath + '"' }
+    [void][System.Diagnostics.Process]::Start($psi)
 }

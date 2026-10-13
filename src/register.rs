@@ -1,22 +1,23 @@
 //! Windows integration (Windows-only).
 //!
-//! Registers Pound so it shows up in the system's app list ("Default apps")
-//! and can be chosen as the handler for `.md` files. Everything is written
-//! under `HKEY_CURRENT_USER`, so no administrator rights are required.
+//! Registers Pound so it shows up in the system's app list ("Default
+//! apps") and can be chosen as the handler for every file kind it
+//! opens. Everything is written under `HKEY_CURRENT_USER`, so no
+//! administrator rights are required.
 //!
 //! Keys created by `register`:
 //!
 //! ```text
-//! HKCU\Software\Classes\Pound.md                      ProgId (description)
+//! HKCU\Software\Classes\Pound.md / Pound.table        ProgIds
 //!     \DefaultIcon                                    -> "pound.exe",0
 //!     \shell\open\command                             -> "pound.exe" "%1"
-//! HKCU\Software\Classes\.md\OpenWithProgids           -> Pound.md
+//! HKCU\Software\Classes\<ext>\OpenWithProgids        -> the ProgId
 //!     (and the .md default value when --default is passed)
-//! HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.md\OpenWithProgids
+//! HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\<ext>\OpenWithProgids
 //! HKCU\Software\RegisteredApplications   Pound = Software\Pound\Capabilities
 //! HKCU\Software\Pound\Capabilities
 //!     ApplicationName / ApplicationDescription
-//!     FileAssociations\.md = Pound.md
+//!     FileAssociations\<ext> = the ProgId
 //! ```
 
 use crate::theme::{
@@ -28,9 +29,29 @@ use std::path::PathBuf;
 use winreg::enums::*;
 use winreg::RegKey;
 
+/// Every extension Pound opens, mapped to its ProgId. `Pound.md`
+/// predates the table views (installed users already carry it, and
+/// `--default` still keys off it); the data formats share one ProgId —
+/// Explorer shows the app name either way.
+const ASSOCIATIONS: &[(&str, &str)] = &[
+    (".md", PROG_ID),
+    (".csv", TABLE_PROG_ID),
+    (".tsv", TABLE_PROG_ID),
+];
+
 const PROG_ID: &str = "Pound.md";
+const TABLE_PROG_ID: &str = "Pound.table";
 const APP_NAME: &str = "Pound";
-const APP_DESCRIPTION: &str = "Markdown reader with a side-by-side source pane";
+const APP_DESCRIPTION: &str = "Viewer for markdown and CSV files";
+
+/// The human description shown for a ProgId.
+fn prog_id_description(prog_id: &str) -> &'static str {
+    if prog_id == TABLE_PROG_ID {
+        "Pound Data Table"
+    } else {
+        "Pound Markdown Document"
+    }
+}
 
 fn exe_path() -> Result<PathBuf, String> {
     std::env::current_exe().map_err(|e| format!("cannot locate the pound executable: {e}"))
@@ -38,6 +59,18 @@ fn exe_path() -> Result<PathBuf, String> {
 
 fn quoted(path: &PathBuf) -> String {
     format!("\"{}\"", path.display())
+}
+
+/// println!, but tolerant of a closed stdout: installers capture this
+/// output via redirected pipes and sometimes close them early, and a
+/// print panic would fail an otherwise successful registration.
+fn say(line: &str) {
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let written = out.write_all(line.as_bytes());
+    let _ = written
+        .and_then(|()| out.write_all(b"\n"))
+        .and_then(|()| out.flush());
 }
 
 fn ctx(what: &str, e: io::Error) -> String {
@@ -166,51 +199,58 @@ pub fn register(set_default: bool) -> Result<(), String> {
     let exe = exe_path()?;
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
 
-    // --- ProgId ---------------------------------------------------------
+    // --- ProgIds ---------------------------------------------------------
     let classes = hkcu
         .create_subkey("Software\\Classes")
         .map_err(|e| ctx("open HKCU\\Software\\Classes", e))?
         .0;
 
-    let (prog_id, _) = classes
-        .create_subkey(PROG_ID)
-        .map_err(|e| ctx("create ProgId", e))?;
-    prog_id
-        .set_value("", &format!("{APP_NAME} Markdown Document"))
-        .map_err(|e| ctx("describe ProgId", e))?;
+    for prog_id in [PROG_ID, TABLE_PROG_ID] {
+        let (key, _) = classes
+            .create_subkey(prog_id)
+            .map_err(|e| ctx("create ProgId", e))?;
+        key.set_value("", &prog_id_description(prog_id))
+            .map_err(|e| ctx("describe ProgId", e))?;
 
-    let (icon, _) = prog_id
-        .create_subkey("DefaultIcon")
-        .map_err(|e| ctx("create DefaultIcon", e))?;
-    icon.set_value("", &format!("{},0", quoted(&exe)))
-        .map_err(|e| ctx("set icon", e))?;
+        let (icon, _) = key
+            .create_subkey("DefaultIcon")
+            .map_err(|e| ctx("create DefaultIcon", e))?;
+        icon.set_value("", &format!("{},0", quoted(&exe)))
+            .map_err(|e| ctx("set icon", e))?;
 
-    let (open, _) = prog_id
-        .create_subkey("shell\\open\\command")
-        .map_err(|e| ctx("create open command", e))?;
-    open.set_value("", &format!("{} \"%1\"", quoted(&exe)))
-        .map_err(|e| ctx("set open command", e))?;
+        let (open, _) = key
+            .create_subkey("shell\\open\\command")
+            .map_err(|e| ctx("create open command", e))?;
+        open.set_value("", &format!("{} \"%1\"", quoted(&exe)))
+            .map_err(|e| ctx("set open command", e))?;
+    }
 
-    // --- .md association -------------------------------------------------
-    let (md, _) = classes
-        .create_subkey(".md")
-        .map_err(|e| ctx("open .md class", e))?;
-    let (open_with, _) = md
-        .create_subkey("OpenWithProgids")
-        .map_err(|e| ctx("create OpenWithProgids", e))?;
-    open_with
-        .set_value(PROG_ID, &"")
-        .map_err(|e| ctx("register in OpenWithProgids", e))?;
+    // --- Extension associations -------------------------------------------
+    for (ext, prog_id) in ASSOCIATIONS {
+        let (class, _) = classes
+            .create_subkey(ext)
+            .map_err(|e| ctx("open extension class", e))?;
+        let (open_with, _) = class
+            .create_subkey("OpenWithProgids")
+            .map_err(|e| ctx("create OpenWithProgids", e))?;
+        open_with
+            .set_value(prog_id, &"")
+            .map_err(|e| ctx("register in OpenWithProgids", e))?;
 
-    let (exts, _) = hkcu
-        .create_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\.md\\OpenWithProgids")
-        .map_err(|e| ctx("open FileExts\\.md", e))?;
-    exts.set_value(PROG_ID, &"")
-        .map_err(|e| ctx("register in FileExts", e))?;
+        let (exts, _) = hkcu
+            .create_subkey(format!(
+                "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\{ext}\\OpenWithProgids"
+            ))
+            .map_err(|e| ctx("open FileExts entry", e))?;
+        exts.set_value(prog_id, &"")
+            .map_err(|e| ctx("register in FileExts", e))?;
 
-    if set_default {
-        md.set_value("", &PROG_ID)
-            .map_err(|e| ctx("set .md default handler", e))?;
+        let (assoc, _) = hkcu
+            .create_subkey("Software\\Pound\\Capabilities\\FileAssociations")
+            .map_err(|e| ctx("create FileAssociations", e))?;
+        assoc
+            .set_value(ext, prog_id)
+            .map_err(|e| ctx("associate extension", e))?;
     }
 
     // --- RegisteredApplications + Capabilities -----------------------------
@@ -229,22 +269,29 @@ pub fn register(set_default: bool) -> Result<(), String> {
     caps.set_value("ApplicationDescription", &APP_DESCRIPTION)
         .map_err(|e| ctx("set application description", e))?;
 
-    let (assoc, _) = caps
-        .create_subkey("FileAssociations")
-        .map_err(|e| ctx("create FileAssociations", e))?;
-    assoc
-        .set_value(".md", &PROG_ID)
-        .map_err(|e| ctx("associate .md", e))?;
+    if set_default {
+        // Only .md: claiming the data formats' defaults from a flag would
+        // decide a preference the user never expressed.
+        let (md, _) = classes
+            .create_subkey(".md")
+            .map_err(|e| ctx("open .md class", e))?;
+        md.set_value("", &PROG_ID)
+            .map_err(|e| ctx("set .md default handler", e))?;
+    }
 
     notify_assoc_changed();
 
     if set_default {
-        println!("{APP_NAME} registered and set as the handler for .md files.");
-        println!("If Windows still asks which app to use, confirm once with \"Always\" or");
-        println!("run:  start ms-settings:defaultapps");
+        say(&format!(
+            "{APP_NAME} registered and set as the handler for .md files."
+        ));
+        say("If Windows still asks which app to use, confirm once with \"Always\" or");
+        say("run:  start ms-settings:defaultapps");
     } else {
-        println!("{APP_NAME} registered in the app list; use \"Open with > Choose another app\"");
-        println!("to pick it for .md files, or re-run with --default.");
+        say(&format!(
+            "{APP_NAME} registered in the app list for .md, .csv and .tsv files;"
+        ));
+        say("use \"Open with > Choose another app\" to pick it for any of them.");
     }
     Ok(())
 }
@@ -263,32 +310,43 @@ pub fn unregister() -> Result<(), String> {
         let _ = registered.delete_value(APP_NAME);
     }
 
-    // ProgId tree.
+    // ProgId trees.
     if let Ok(classes) = hkcu.open_subkey_with_flags("Software\\Classes", KEY_READ) {
-        delete_tree(&classes, PROG_ID);
+        for prog_id in [PROG_ID, TABLE_PROG_ID] {
+            delete_tree(&classes, prog_id);
+        }
 
-        // .md cleanup: remove ourselves from OpenWithProgids; if we were the
-        // default handler, clear it so Windows falls back to its own logic.
-        if let Ok(md) = classes.open_subkey_with_flags(".md", KEY_READ | KEY_SET_VALUE) {
-            if let Ok(owp) = md.open_subkey_with_flags("OpenWithProgids", KEY_SET_VALUE) {
-                let _ = owp.delete_value(PROG_ID);
+        // Extension cleanup: remove ourselves from OpenWithProgids; on
+        // .md also clear the default when it was us (set via --default).
+        for (ext, prog_id) in ASSOCIATIONS {
+            let Ok(class) = classes.open_subkey_with_flags(ext, KEY_READ | KEY_SET_VALUE) else {
+                continue;
+            };
+            if let Ok(owp) = class.open_subkey_with_flags("OpenWithProgids", KEY_SET_VALUE) {
+                let _ = owp.delete_value(prog_id);
             }
-            if let Ok(current) = md.get_value::<String, _>("") {
-                if current == PROG_ID {
-                    let _ = md.delete_value("");
+            if *ext == ".md" {
+                if let Ok(current) = class.get_value::<String, _>("") {
+                    if current == *prog_id {
+                        let _ = class.delete_value("");
+                    }
                 }
             }
         }
     }
 
-    if let Ok(exts) = hkcu.open_subkey_with_flags(
-        "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\.md\\OpenWithProgids",
-        KEY_SET_VALUE,
-    ) {
-        let _ = exts.delete_value(PROG_ID);
+    for (ext, prog_id) in ASSOCIATIONS {
+        if let Ok(exts) = hkcu.open_subkey_with_flags(
+            &format!(
+                "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\{ext}\\OpenWithProgids"
+            ),
+            KEY_SET_VALUE,
+        ) {
+            let _ = exts.delete_value(prog_id);
+        }
     }
 
     notify_assoc_changed();
-    println!("{APP_NAME} unregistered.");
+    say(&format!("{APP_NAME} unregistered."));
     Ok(())
 }
