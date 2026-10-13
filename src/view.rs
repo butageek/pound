@@ -636,6 +636,9 @@ fn push_document(webview: &WebView, presenter: &Presenter) {
             json_str(&presenter.display_path()),
             json_str(&presenter.status_text()),
             presenter.is_dirty(),
+            // String arguments must go through json_str: raw text would
+            // evaluate as a JS identifier and throw — silently, since
+            // wry ignores script exceptions — killing the whole push.
             json_str(presenter.view_mode()),
             json_str(presenter.error_text()),
         ),
