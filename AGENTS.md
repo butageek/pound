@@ -82,8 +82,12 @@ Architecture is strict MVP
   only that column (same bounds): every column carries its own px
   width and the table is exactly their sum — no percentage shares
   couple them. The widths + scroll survive the sort's re-render
-  (`csvColWidths`, re-applied in `setupCsvTable`); tables wider than the
-  pane scroll horizontally with a sticky header. Files beyond 10,000 data
+  (`csvColWidths`, re-applied in `setupCsvTable` and pinned before the
+  scroll is restored — an unpinned table fits the pane and would clamp
+  the sideways position away); tables wider than the pane scroll
+  horizontally with a sticky header, opting out of the markdown
+  `#content table` `display:block`/`max-width` rule (a clamped sum
+  makes the engine rescale every column together). Files beyond 10,000 data
   rows render the cap plus a visible note; the status bar counts
   rows/columns (the file's true shape), never characters. Binary files
   (PDFs, .docx, ...) fail with an actionable message instead of Rust's

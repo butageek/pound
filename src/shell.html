@@ -341,8 +341,13 @@
   #content table.csv {
     /* fixed layout: columns follow the <col> px widths the shell sets;
        the table width is pinned to their sum (see applyCsvWidths), so
-       columns never stretch or shrink to fit the pane */
+       columns never stretch or shrink to fit the pane. display/max-width
+       opt out of the markdown "#content table" scrolling rule above:
+       its max-width would clamp the sum, and Chromium then rescales every
+       fixed-layout column proportionally — resizing one would resize
+       them all again. */
     table-layout: fixed; border-collapse: collapse; width: 100%;
+    display: table; max-width: none; overflow: visible;
     margin: 0 0 18px;
   }
   #content table.csv th, #content table.csv td {
@@ -519,6 +524,7 @@
       document.body.dataset.mode = mode;
       const wrap = document.getElementById('content-wrap');
       const scroll = wrap.scrollTop;
+      const scrollX = wrap.scrollLeft;
       const content = document.getElementById('content');
       const welcome = document.getElementById('welcome');
       content.innerHTML = html;
@@ -534,12 +540,16 @@
       document.getElementById('status-info').textContent = status;
       setSaveEnabled(edited);
       if (title) document.title = title;
-      wrap.scrollTop = scroll; // keep the reading position on reload
-      addCopyButtons();
       // A new document resets the layout state (a sort of the previous
-      // table must not impose its column widths on this one).
+      // table must not impose its column widths on this one), and the
+      // table must be sized before the scroll is restored — until its
+      // widths are pinned, a fresh CSV table fits the pane and a
+      // sideways position would clamp away.
       csvColWidths = null;
       if (mode === 'csv') setupCsvTable();
+      wrap.scrollTop = scroll; // keep the reading position on reload
+      wrap.scrollLeft = scrollX; // wide tables keep their column
+      addCopyButtons();
     },
     // Edit-driven refresh (see push_rendered): update the preview, status
     // bar and save state WITHOUT touching the editor buffer. A CSV sort
@@ -550,12 +560,14 @@
       const scroll = wrap.scrollTop;
       const scrollX = wrap.scrollLeft;
       document.getElementById('content').innerHTML = html;
+      // Size the table before restoring the scroll (same reason as in
+      // setContent): only a pinned table can hold a sideways position.
+      if (document.body.dataset.mode === 'csv') setupCsvTable();
       wrap.scrollTop = scroll;
       wrap.scrollLeft = scrollX; // a CSV sort must not jump sideways either
       document.getElementById('status-info').textContent = status;
       setSaveEnabled(edited);
       addCopyButtons();
-      if (document.body.dataset.mode === 'csv') setupCsvTable();
     },
     setError(msg) {
       const el = document.getElementById('error');
