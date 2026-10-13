@@ -10,9 +10,10 @@
 
 **Repo:** [github.com/butageek/pound](https://github.com/butageek/pound) · Issues and PRs welcome.
 
-**Pound** is a lightweight **file viewer for Windows** written in Rust. It
-starts with markdown — rendered out of the box, with the raw source one
-toggle away — and is growing into more file types (CSV) and editing.
+**Pound** is a lightweight **file viewer for Windows** written in Rust.
+Drop a file, see it properly: markdown renders with a live-editable
+source pane beside it, `.csv`/`.tsv` become sortable tables, and any
+other text file opens straight into the editor.
 
 > Working MVP: Windows 10/11. Development happens on Linux/WSL; see
 > [AGENTS.md](AGENTS.md) for the environment, build and release playbook
@@ -38,8 +39,9 @@ irm https://raw.githubusercontent.com/butageek/pound/main/tools/install.ps1 | ie
 
 This downloads the latest release build from GitHub, copies it to
 `%LOCALAPPDATA%\Pound`, adds a Start Menu shortcut and your user `PATH`,
-and registers Pound with Windows so `.md` files can open with it. Then
-right-click any `.md` file → **Open with** → **Pound** (tick *Always*).
+and registers Pound with Windows so `.md`, `.csv` and `.tsv` files can
+open with it. Then right-click any of those files → **Open with** →
+**Pound** (tick *Always*).
 
 **Upgrades use the exact same command** — it detects an existing install,
 closes a running Pound (gracefully, then forcefully), replaces the exe,
@@ -67,11 +69,13 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
   — the same class of engine VSCode's preview uses — with eye-comfort
   palettes from the editor world (Solarized Light, Catppuccin Latte,
   One Dark, Catppuccin Mocha) and native Segoe UI / Consolas typography.
-- **Settings page** — theme mode (Auto follows the system, Light, Dark)
-  plus a light and a dark palette of your choice, applied live and
-  remembered across starts.
-- Opens `.md` / `.markdown` files from double-click, drag-and-drop, or the
-  command line (`pound file.md`).
+- **Settings page** — theme mode (Auto follows the system, Light, Dark),
+  a light and a dark palette of your choice, and one typeface + size for
+  every reading and editing surface — applied live and remembered across
+  starts.
+- Opens files from double-click, drag-and-drop, or the command line
+  (`pound file.md`): `.md`/`.markdown` render, `.csv`/`.tsv` open as
+  tables, any other text file opens in the editor.
 - **Rendered view by default**, with a **Source toggle** that opens a
   side-by-side panel showing the raw markdown. Shortcut: `Ctrl+U`.
 - **Synced scrolling** — in split view, scrolling either pane scrolls the
@@ -80,8 +84,16 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
   rendered preview instantly (debounced), `Ctrl+S` or the **Save** button
   writes the file back to disk. The title bar and status bar mark
   unsaved edits, and edits are never clobbered by on-disk changes.
-- **Status bar**: full path of the open file plus its type, character and
-  line counts.
+- **CSV/TSV tables** — the delimiter is detected per file (comma,
+  semicolon, tab or pipe, so European Excel exports work out of the
+  box). Columns open at content-fit widths and resize individually, a
+  header click sorts (numerically for number columns, empty cells
+  sink), and the header stays visible while you scroll. Huge exports
+  render the first 10,000 rows with a note of the true count.
+- **Plain text just opens** — a text file is its own source: `.txt`,
+  `.log`, whatever, it opens straight into the editor.
+- **Status bar**: full path of the open file plus its type — character
+  and line counts for text, rows and columns for tables.
 - Full CommonMark via pulldown-cmark: tables, task lists, strikethrough,
   inline HTML (sanitized), local images (served via a custom `poundimg://`
   protocol), links open in your browser, code blocks have copy buttons.
@@ -99,14 +111,16 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
 
 | Layer | File | Responsibility |
 |---|---|---|
-| Model | `src/model.rs` | App state: open document (source + rendered HTML), source toggle, errors, reload revision. No UI types. |
+| Model | `src/model.rs` | App state: open document (source, rendered HTML, CSV grid + sort), errors, unsaved/disk-conflict flags, reload revision. No UI types. |
 | Rendering input | `src/markdown.rs` | pulldown-cmark → HTML; rewrites local images to `poundimg://`; sanitizes with ammonia. Unit-tested headlessly. |
+| Rendering input | `src/csv.rs` | delimited text → sanitized, sortable HTML table; delimiter sniffing, numeric-aware sorts. Unit-tested headlessly. |
 | Presenter | `src/presenter.rs` | User intents: open/toggle, drag-and-drop routing, link opening. Owns the Model. |
+| JS bridge | `src/ipc.rs` | The shell↔host wire protocol (`ipc::Message`), headless-tested. |
 | View | `src/view.rs` | WebView2 shell (tao + wry): top bar, rendered pane, source pane, status bar. Displays the model, forwards intents. |
 | Windows glue | `src/register.rs` | Registry integration (`register` / `unregister` subcommands). |
 
 ```
- double-click .md ─┐
+ double-click file ─┐
  drag & drop ──────┤        ┌─────────────────┐  intents   ┌────────────┐ state ┌───────┐
  CLI argument ─────┼─────► │  View           │ ─────────► │ Presenter  │ ────► │ Model │
  Ctrl+U toggle ────┘       │  (WebView2/wry) │ ◄───────── │            │ ◄───  │       │
@@ -119,9 +133,11 @@ into HTML+CSS instead of being hand-laid-out by the GUI toolkit.
 
 ## Using it
 
-- Double-click a `.md` file (once Pound is the handler), or run
+- Double-click a file (once Pound is the handler), or run
   `pound file.md`, or drag a file onto the window.
-- The document renders immediately.
+- Markdown renders immediately; `.csv`/`.tsv` open as a table — click a
+  header to sort, drag a header edge to resize that column — and any
+  other text file opens straight in the editor.
 - Click **Source** (top right) or press `Ctrl+U` to toggle the side-by-side
   raw markdown panel. In split view, scrolling either pane scrolls the
   other to the matching position.
@@ -134,11 +150,13 @@ into HTML+CSS instead of being hand-laid-out by the GUI toolkit.
 
 `pound register [--default]` writes **HKCU-only** keys (no admin):
 
-- `HKCU\Software\Classes\Pound.md` — a ProgId with `shell\open\command`
-  `"pound.exe" "%1"`, so the app appears in *Open with* / *Default apps*.
-- `.md\OpenWithProgids` + `Explorer\FileExts\.md\OpenWithProgids` entries.
+- `HKCU\Software\Classes\Pound.md` + `Pound.table` — ProgIds with
+  `shell\open\command` `"pound.exe" "%1"`, so the app appears in
+  *Open with* / *Default apps*.
+- `OpenWithProgids` entries for `.md`, `.csv` and `.tsv` (plus their
+  `Explorer\FileExts` counterparts).
 - `HKCU\Software\RegisteredApplications` + `Software\Pound\Capabilities`
-  (name, description, `.md` FileAssociation) — this is what puts Pound in
+  (name, description, the file associations) — this is what puts Pound in
   the **system app list** other apps enumerate.
 - With `--default`, it also sets the per-user `.md` class default and
   notifies the shell (`SHChangeNotify`).
@@ -207,10 +225,10 @@ by `tools/gen_icon.py` (stdlib only, deterministic):
 
 ## Roadmap
 
-Pound starts as a markdown reader and grows into a lightweight viewer and
-editor for more file types.
+Pound reads and edits what it opens today — markdown, CSV/TSV and plain
+text. Ideas for what's next:
 
-- [ ] More file types: CSV/TSV tables first, then plain text and beyond
+- [ ] More file types beyond those (issues with your pet format welcome)
 - [ ] Syntax highlighting for the source pane
 - [ ] Table of contents sidebar; footnotes; remote images
 - [ ] winget manifest once the release has some real-world use

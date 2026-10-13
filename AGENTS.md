@@ -11,8 +11,9 @@ wry + pulldown-cmark). It started as a markdown reader — `.md` files
 render by default with the raw source side by side (Ctrl+U), and the
 source pane is a live editor: typing re-renders the preview and `Ctrl+S`
 saves back to disk. Beyond markdown, `.csv`/`.tsv` files render as a
-sortable, column-resizable table (no source pane — data, not prose).
-Architecture is strict MVP
+sortable, column-resizable table (no source pane — data, not prose),
+and any other text file opens straight into the editor (a text file is
+its own source). Architecture is strict MVP
 (Model–View–Presenter) — keep it that way:
 
 | Layer | File | Rule |
@@ -23,7 +24,7 @@ Architecture is strict MVP
 | Presenter | `src/presenter.rs` | intents/use-cases; owns the Model behind a **private field** — the view mutates only via intents (`open_externally`, `refuse_link`, `fail`, …) and reads only via accessors (`html()`, `is_dirty()`, `revision()`, …), never `model.*` directly; no GUI types |
 | JS bridge | `src/ipc.rs` | the shell→host wire protocol (`ipc::Message`, `parse`) + host→shell string encoding (`json_str`); headless-tested |
 | View | `src/view.rs` | WebView2 shell (tao + wry): window + event loop, ipc dispatch; embeds the shell document (`src/shell.html` via `include_str!`) |
-| Windows glue | `src/register.rs` | HKCU registry: app-list registration + `.md` association |
+| Windows glue | `src/register.rs` | HKCU registry: app-list registration + `.md`/`.csv`/`.tsv` associations |
 
 ## Environment
 
@@ -110,7 +111,8 @@ Architecture is strict MVP
   `json_str` (quoting only; XSS is handled by ammonia). The wire protocol
   itself — parsing the shell's ipc messages and encoding the host's
   replies — lives in `src/ipc.rs` (`ipc::Message`), unit-tested headlessly. `status` feeds the
-  bottom status bar (path + file type + char/line counts; `model.rs` strips
+  bottom status bar (path + file type + char/line counts — rows/columns
+  for tables; `model.rs` strips
   the `\\?\` verbatim prefix `canonicalize` adds, so users see `C:\…`).
 - JS → Rust: in-page controls navigate to `pound://dismiss-error` (error
   banner), intercepted by the navigation handler which calls presenter
@@ -232,7 +234,7 @@ Architecture is strict MVP
   post `save-and-exit` (the host saves first and only exits when the
   buffer is clean — a failed save keeps the app open with the banner) or
   `exit`; Cancel posts `cancel-exit` to clear a pending update. Both
-  answers resolve through `update::plan_exit` (unit-tested): only the
+  answers resolve through `update::plan_exit`: only the
   update flow (the toast's Update button armed the pending flag) may
   run the installer on the way out; a plain close just saves or
   discards and exits — an unconditional `begin_update` here once
