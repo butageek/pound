@@ -3,6 +3,7 @@
 //! Architecture (MVP pattern):
 //! - [`model`]      : state (document, view mode, errors)
 //! - [`markdown`]   : rendering input (markdown source -> sanitized HTML)
+//! - [`csv`]        : rendering input (delimited text -> sortable table)
 //! - [`presenter`]  : user intents / use-cases over the model
 //! - [`ipc`]        : the JS bridge (shell -> host messages, host -> shell
 //!   string encoding)
@@ -17,6 +18,8 @@ mod cli;
 // non-Windows hosts run the tests only.
 #[cfg(windows)]
 mod clipboard;
+#[cfg(any(windows, test))]
+mod csv;
 #[cfg(any(windows, test))]
 mod fonts;
 #[cfg(any(windows, test))]

@@ -14,6 +14,10 @@ categories = ["text-processing", "gui"]
 pulldown-cmark = "0.13"
 ammonia = "4"
 open = "5"
+# RFC-4180 parsing for CSV/TSV tables (quoting, embedded newlines and
+# delimiters, ragged rows via flexible mode); default-features off
+# keeps serde out — we read untyped records only.
+csv = { version = "1", default-features = false }
 # Classed-span highlighting (colors live in the shell CSS, so the
 # default themes dump is skipped); regex-fancy keeps the build pure
 # Rust — no oniguruma C dependency for the MSVC release host.

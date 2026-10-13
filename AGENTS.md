@@ -10,14 +10,16 @@ Pound is a lightweight file viewer for Windows written in Rust (tao +
 wry + pulldown-cmark). It started as a markdown reader — `.md` files
 render by default with the raw source side by side (Ctrl+U), and the
 source pane is a live editor: typing re-renders the preview and `Ctrl+S`
-saves back to disk. It is growing into a viewer for more commonly used
-file types (CSV next). Architecture is strict MVP
+saves back to disk. Beyond markdown, `.csv`/`.tsv` files render as a
+sortable, column-resizable table (no source pane — data, not prose).
+Architecture is strict MVP
 (Model–View–Presenter) — keep it that way:
 
 | Layer | File | Rule |
 |---|---|---|
 | Model | `src/model.rs` | state only, no UI types |
 | Rendering input | `src/markdown.rs` | pulldown-cmark → sanitized HTML, unit-tested headlessly |
+| Rendering input | `src/csv.rs` | delimited text → sanitized, sortable HTML table (delimiter sniffing, numeric-aware sort, 10k-row render cap), unit-tested headlessly |
 | Presenter | `src/presenter.rs` | intents/use-cases; owns the Model behind a **private field** — the view mutates only via intents (`open_externally`, `refuse_link`, `fail`, …) and reads only via accessors (`html()`, `is_dirty()`, `revision()`, …), never `model.*` directly; no GUI types |
 | JS bridge | `src/ipc.rs` | the shell→host wire protocol (`ipc::Message`, `parse`) + host→shell string encoding (`json_str`); headless-tested |
 | View | `src/view.rs` | WebView2 shell (tao + wry): window + event loop, ipc dispatch; embeds the shell document (`src/shell.html` via `include_str!`) |
@@ -52,15 +54,36 @@ file types (CSV next). Architecture is strict MVP
   baselines, code chips and tables are an endless whack-a-mole).
 - Guiding principle: "the file's bytes are the truth; rendering is a
   layer; when rendering fails, fall back to source, never eat content."
-- **Only markdown extensions render as markdown.** `model::
-  is_markdown_path` (`.md`/`.markdown`) is the one source of truth for
-  rendering, the plain view mode and `type_label`. Every other text
-  file renders **nothing** (`html` stays empty, edits never re-render):
-  the view shows the **editable source pane alone** — a text file is
-  its own source, so there is no second pane, no Source toggle
-  (`body.plain` CSS), full editor right-click menu, and the scroll
-  sync is inert (no anchor blocks). `markdown::to_plain_html` was
-  removed when this landed.
+- **`model::FileType` is the one source of truth** for rendering, pane
+  layout and `type_label`: `Markdown` (`.md`/`.markdown`) renders the
+  preview + editable source side by side; `Csv` (`.csv`/`.tsv`) renders
+  a table-only view; everything else is `Plain` and renders **nothing**
+  (`html` stays empty, edits never re-render) — the view shows the
+  **editable source pane alone**, a text file being its own source: no
+  second pane, no Source toggle, full editor right-click menu, inert
+  scroll sync. The shell picks the layout from the mode string pushed
+  with the document (`body[data-mode="markdown|plain|csv"]` CSS;
+  `presenter::view_mode`).
+- **CSV files (`csv.rs`)**: the delimiter is sniffed from the first
+  line (`,` `;` tab `|`, outside quotes), the first row is the header,
+  and cells are escaped + ammonia-sanitized (file content never
+  executes; ammonia's default allowlist already covers the table set —
+  only the `class` attrs are added). The view is the table alone:
+  read-only, no source pane, Save and Source hidden. **Sorting** stays
+  in the unidirectional flow — a header click posts
+  `csv-sort\n<column>`, `Model::sort_csv` re-renders the stored grid
+  under the new sort (same column toggles direction) and the usual
+  preview push delivers it; numeric columns (every non-empty value
+  parses) sort numerically, empties sink. **Column widths** are pure
+  layout and live in the shell: equal shares initially, drag the
+  header's right edge to resize (min 40px), and the widths + scroll
+  survive the sort's re-render (`csvColWidths`, re-applied in
+  `setupCsvTable`). Wide tables get a per-column min-width so the pane
+  scrolls horizontally with a sticky header. Files beyond 10,000 data
+  rows render the cap plus a visible note; the status bar counts
+  rows/columns (the file's true shape), never characters. Binary files
+  (PDFs, .docx, ...) fail with an actionable message instead of Rust's
+  UTF-8 error.
 - **Syntax highlighting** happens in `markdown.rs` at render time:
   fenced blocks with a language syntect knows are highlighted into
   classed spans (`<span class="storage type …">`, `highlight_codeblocks`
@@ -111,7 +134,19 @@ file types (CSV next). Architecture is strict MVP
   `window.ipc.postMessage('ready')` when its scripts parsed and the view
   re-pushes the document. `window.ipc` is injected only when
   `with_ipc_handler` is registered, so it's a no-op in plain browsers and
-  the preview recipe below keeps working.
+  the preview recipe below keeps working. **The race can eat BOTH
+  directions** (observed with runtime 154: eager push lost AND 'ready'
+  posts never delivered — an empty welcome window over a loaded
+  document, correct title, dead ipc; intermittent, so it looked like a
+  code regression for an evening). Belt and suspenders: the shell
+  re-posts 'ready' at +250ms/+1s/+2.5s (idempotent host-side), and the
+  view keeps a `ready_seen` flag with a watchdog that re-pushes the
+  document every 500ms (after a 700ms grace, max 20 tries) until the
+  handshake lands. Debug such states via
+  `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`
+  + CDP (`/json/list` → WebSocket → `Runtime.evaluate`) — the window
+  title shows whether the *document* loaded (Rust side) while the DOM
+  shows whether the *push* landed.
 - Local images: `markdown.rs` rewrites relative srcs to percent-encoded
   `poundimg://<abs path>`; the view serves them from disk via a custom
   protocol. Unknown/missing files keep their src (broken-image marker).

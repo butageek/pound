@@ -228,13 +228,22 @@
   }
   #source-wrap { display: none; flex: 1 1 0; min-width: 0; background: var(--bg); }
   body.split #source-wrap { display: block; }
-  /* A plain-text file IS its own source: the editable pane is the whole
-     view — no rendered pane, no Source toggle (nothing to toggle). The
-     leftover `split` class is overridden rather than removed, so the
-     toggle state survives when a markdown file is opened next. */
-  body.plain #content-wrap { display: none; }
-  body.plain #source-wrap { display: block; }
-  body.plain #topbar .toggle { display: none; }
+  /* Pane layouts by document kind (body[data-mode]):
+     plain — a text file IS its own source: the editable pane is the
+             whole view; no rendered pane, no Source toggle (nothing to
+             toggle). The leftover `split` class is overridden rather
+             than removed, so the toggle state survives when a markdown
+             file is opened next.
+     csv   — a data table, not prose: the rendered table is the whole
+             view; no source pane, no toggle, no Save (read-only). */
+  body[data-mode="plain"] #content-wrap { display: none; }
+  body[data-mode="plain"] #source-wrap { display: block; }
+  body[data-mode="plain"] #topbar .toggle { display: none; }
+  body[data-mode="csv"] #source-wrap { display: none; }
+  body[data-mode="csv"] #topbar .toggle,
+  body[data-mode="csv"] #topbar #save { display: none; }
+  /* Wide tables scroll sideways inside the rendered pane. */
+  body[data-mode="csv"] #content-wrap { overflow-x: auto; }
   /* The source pane is a plain textarea: a real editor with native caret,
      selection and undo. It is never rewritten during editing (pushes go to
      pound.setRendered) so that state survives every keystroke. */
@@ -328,6 +337,41 @@
   }
   #content th, #content td { border: 1px solid var(--border); padding: 6px 13px; }
   #content th { background: var(--th-bg); font-weight: 600; }
+
+  /* ---- CSV tables (the csv-mode view; the HTML comes from csv.rs) ---- */
+  #content table.csv {
+    /* fixed layout: columns follow the <col> widths the shell sets
+       (equal shares to start, dragged widths after that) */
+    table-layout: fixed; border-collapse: collapse; width: 100%;
+    margin: 0 0 18px;
+  }
+  #content table.csv th, #content table.csv td {
+    border: 1px solid var(--border); padding: 5px 10px;
+    /* wide cells clip with an ellipsis — resize the column to see more */
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #content table.csv thead th {
+    position: sticky; top: 0; z-index: 1; background: var(--th-bg);
+    cursor: pointer; user-select: none; text-align: left;
+  }
+  #content table.csv thead th:hover { background: var(--hover); }
+  #content table.csv th.sort-asc::after { content: " \2191"; }  /* ↑ */
+  #content table.csv th.sort-desc::after { content: " \2193"; } /* ↓ */
+  #content table.csv th.num, #content table.csv td.num {
+    text-align: right; font-variant-numeric: tabular-nums;
+  }
+  #content table.csv tbody tr:nth-child(even) td { background: var(--hover); }
+  /* The drag handle lives on the header's right edge (added by the
+     shell, so it never goes through the sanitizer); sticky th is the
+     positioning context. */
+  #content table.csv th .col-resizer {
+    position: absolute; top: 0; right: 0; width: 8px; height: 100%;
+    cursor: col-resize;
+  }
+  #content table.csv th .col-resizer:hover { background: var(--hover); }
+  #content .csv-note, #content .csv-empty {
+    color: var(--muted); font-size: 0.9em; margin: 10px 2px 0;
+  }
   #content img { max-width: 100%; }
   #content hr { border: 0; border-top: 1px solid var(--border); margin: 24px 0; }
   #content ul, #content ol { padding-left: 2em; margin: 0 0 16px; }
@@ -369,7 +413,7 @@
   })();
 </script>
 </head>
-<body>
+<body data-mode="markdown">
   <div id="topbar">
     <span class="brand">Pound</span>
     <span class="spacer"></span>
@@ -385,7 +429,7 @@
       <div id="welcome">
         <h1>Pound</h1>
         <div>A tiny markdown reader.</div>
-        <div>Drop a <code>.md</code> file anywhere in this window,</div>
+        <div>Drop a <code>.md</code> or <code>.csv</code> file anywhere in this window,</div>
         <div>or run <code>pound path/to/file.md</code> from a terminal.</div>
       </div>
       <article id="content"></article>
@@ -472,15 +516,15 @@
   </div>
 <script>
   window.pound = {
-    setContent(html, source, title, path, status, edited, plain) {
-      document.body.classList.toggle('plain', plain);
+    setContent(html, source, title, path, status, edited, mode) {
+      document.body.dataset.mode = mode;
       const wrap = document.getElementById('content-wrap');
       const scroll = wrap.scrollTop;
       const content = document.getElementById('content');
       const welcome = document.getElementById('welcome');
       content.innerHTML = html;
       content.style.display = html ? 'block' : 'none';
-      welcome.style.display = html || plain ? 'none' : 'flex';
+      welcome.style.display = html || mode !== 'markdown' ? 'none' : 'flex';
       sourceEl.value = source;
       // Park the caret at the top: a value assignment leaves it at the
       // end, so the first focus would auto-scroll the pane to the bottom.
@@ -493,9 +537,15 @@
       if (title) document.title = title;
       wrap.scrollTop = scroll; // keep the reading position on reload
       addCopyButtons();
+      // A new document resets the layout state (a sort of the previous
+      // table must not impose its column widths on this one).
+      csvColWidths = null;
+      if (mode === 'csv') setupCsvTable();
     },
     // Edit-driven refresh (see push_rendered): update the preview, status
-    // bar and save state WITHOUT touching the editor buffer.
+    // bar and save state WITHOUT touching the editor buffer. A CSV sort
+    // arrives here too (same flow): the table is rebuilt, so the shell
+    // re-applies its column widths — only the sort order changed.
     setRendered(html, status, edited) {
       const wrap = document.getElementById('content-wrap');
       const scroll = wrap.scrollTop;
@@ -504,6 +554,7 @@
       document.getElementById('status-info').textContent = status;
       setSaveEnabled(edited);
       addCopyButtons();
+      if (document.body.dataset.mode === 'csv') setupCsvTable();
     },
     setError(msg) {
       const el = document.getElementById('error');
@@ -591,10 +642,11 @@
 
   const toggle = document.getElementById('source-toggle');
   const applySplit = () => {
-    // Plain files show only the source pane; there is nothing to toggle.
-    // Drop the split class too, so a later markdown file does not open
-    // with a source pane its (unchecked) toggle disagrees with.
-    if (document.body.classList.contains('plain')) {
+    // Plain files show only the source pane and CSV files only the
+    // rendered table; in neither is there anything to toggle. Drop the
+    // split class too, so a later markdown file does not open with a
+    // source pane its (unchecked) toggle disagrees with.
+    if (document.body.dataset.mode !== 'markdown') {
       toggle.checked = false;
       document.body.classList.remove('split');
       return;
@@ -724,6 +776,67 @@
       return;
     }
     hostSend('link\n' + href);
+  });
+
+  // ---- CSV tables: sort (host) + column widths (local) ----------------
+  // Sorting is host-side: Rust re-renders the table from the stored
+  // grid, numeric-aware, through the same unidirectional ipc flow as
+  // every other intent. Column widths are pure layout, so they live
+  // here and survive re-renders (a sort rebuilds the table; the widths
+  // and scroll position are re-applied afterwards).
+  let csvColWidths = null; // per-column CSS widths, kept across sorts
+  const saveCsvWidths = () => {
+    const cols = document.querySelectorAll('#content table.csv colgroup col');
+    csvColWidths = cols.length ? [...cols].map(c => c.style.width || '') : null;
+  };
+  function setupCsvTable() {
+    const table = document.querySelector('#content table.csv');
+    if (!table) return;
+    const cols = table.querySelectorAll('colgroup col');
+    if (cols.length) {
+      // Wide tables grow past the pane so their columns stay readable;
+      // the pane scrolls sideways (see the overflow-x rule).
+      table.style.minWidth = cols.length * 72 + 'px';
+      if (csvColWidths && csvColWidths.length === cols.length) {
+        cols.forEach((c, i) => (c.style.width = csvColWidths[i]));
+      } else {
+        // Equal shares to start.
+        const even = 100 / cols.length;
+        cols.forEach(c => (c.style.width = even + '%'));
+      }
+    }
+    table.querySelectorAll('thead th').forEach(th => {
+      if (th.querySelector('.col-resizer')) return;
+      const grip = document.createElement('div');
+      grip.className = 'col-resizer';
+      grip.addEventListener('mousedown', e => startColResize(e, th, table));
+      th.appendChild(grip);
+    });
+  }
+  function startColResize(e, th, table) {
+    e.preventDefault();
+    e.stopPropagation();
+    const col = table.querySelectorAll('colgroup col')[th.cellIndex];
+    if (!col) return;
+    const startX = e.clientX;
+    const startW = th.getBoundingClientRect().width;
+    const move = ev => {
+      col.style.width = Math.max(40, startW + ev.clientX - startX) + 'px';
+    };
+    const up = () => {
+      removeEventListener('mousemove', move);
+      removeEventListener('mouseup', up);
+      saveCsvWidths();
+    };
+    addEventListener('mousemove', move);
+    addEventListener('mouseup', up);
+  }
+  // Header click = sort (a click on the resize grip is not a sort).
+  document.getElementById('content').addEventListener('click', e => {
+    const th = e.target.closest('table.csv thead th');
+    if (!th || e.target.closest('.col-resizer')) return;
+    saveCsvWidths(); // the re-render rebuilds the table; keep the widths
+    hostSend('csv-sort\n' + th.cellIndex);
   });
 
   // ---- settings ---------------------------------------------------------
@@ -910,6 +1023,11 @@
   // 'ready' (window.ipc exists only inside the app — in a plain browser
   // this is a no-op, keeping the preview recipe usable).
   if (window.ipc) window.ipc.postMessage('ready');
+  // The handshake itself can lose WebView2's startup race (observed as
+  // an empty window whose document loaded fine behind it): re-post a
+  // few times — the host treats extra 'ready's as idempotent.
+  [250, 1000, 2500].forEach(ms =>
+    setTimeout(() => { if (window.ipc) window.ipc.postMessage('ready'); }, ms));
 </script>
 </body>
 </html>

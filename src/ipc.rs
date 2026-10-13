@@ -46,6 +46,9 @@ pub enum Message {
     Link { href: String },
     /// The (debounced) editor buffer changed.
     Edit { text: String },
+    /// A CSV table header click: re-render sorted by that column (the
+    /// same column toggles the direction).
+    CsvSort { column: usize },
 }
 
 /// Parse one ipc message body. Returns `None` for anything the host does
@@ -72,6 +75,14 @@ pub fn parse(body: &str) -> Option<Message> {
         return Some(Message::Link {
             href: href.to_owned(),
         });
+    }
+    if let Some(column) = body.strip_prefix("csv-sort\n") {
+        // A bare usize; anything else (negative, text, empty) is not a
+        // message and is ignored.
+        return column
+            .parse()
+            .ok()
+            .map(|column| Message::CsvSort { column });
     }
     match body {
         "ready" => Some(Message::Ready),
@@ -186,6 +197,16 @@ mod tests {
                 href: "file:///C:/my%20docs/x.md".to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn csv_sort_takes_a_bare_column_index() {
+        assert_eq!(parse("csv-sort\n0"), Some(Message::CsvSort { column: 0 }));
+        assert_eq!(parse("csv-sort\n12"), Some(Message::CsvSort { column: 12 }));
+        assert_eq!(parse("csv-sort\nx"), None);
+        assert_eq!(parse("csv-sort\n-1"), None);
+        assert_eq!(parse("csv-sort\n"), None);
+        assert_eq!(parse("csv-sort"), None);
     }
 
     #[test]

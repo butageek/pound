@@ -119,6 +119,11 @@ pub fn run(file: Option<PathBuf>) {
     // Set when the user confirmed an exit (ipc handlers run inside WebView2
     // message dispatch and cannot touch ControlFlow themselves).
     let exit = Rc::new(Cell::new(false));
+    // Whether the shell's 'ready' handshake ever arrived. WebView2 can
+    // drop both the eager content push and the first 'ready' post to a
+    // startup race (seen as an empty window over a loaded document);
+    // the watchdog below re-pushes until the shell answers.
+    let ready_seen = Rc::new(Cell::new(false));
     // "Update & restart" with unsaved edits: show the close prompt first
     // and run the installer when the exit actually goes through.
     let update_on_exit = Rc::new(Cell::new(false));
@@ -186,6 +191,7 @@ pub fn run(file: Option<PathBuf>) {
     let ipc_installer = Arc::clone(&installer);
     let ipc_clipboard_reply = Arc::clone(&clipboard_reply);
     let ipc_theme_changed = theme_changed.clone();
+    let ipc_ready_seen = ready_seen.clone();
     // Font list for validating settings-page saves (see fonts::families).
     let ipc_fonts = fonts.clone();
     let builder = builder.with_ipc_handler(move |request| {
@@ -218,7 +224,10 @@ pub fn run(file: Option<PathBuf>) {
             return;
         };
         match message {
-            ipc::Message::Ready => ipc_dirty.set(true),
+            ipc::Message::Ready => {
+                ipc_ready_seen.set(true);
+                ipc_dirty.set(true);
+            }
             ipc::Message::Save => {
                 ipc_presenter.borrow_mut().save();
                 ipc_preview.set(true);
@@ -330,6 +339,13 @@ pub fn run(file: Option<PathBuf>) {
                 ipc_presenter.borrow_mut().edit_source(&text);
                 ipc_preview.set(true);
             }
+            ipc::Message::CsvSort { column } => {
+                // Table-only refresh: same flow as an edit, minus the
+                // (nonexistent) editor buffer to protect.
+                if ipc_presenter.borrow_mut().sort_csv(column) {
+                    ipc_preview.set(true);
+                }
+            }
         }
     });
     // File drops: WebView2 forwards them to the host only when a
@@ -366,6 +382,15 @@ pub fn run(file: Option<PathBuf>) {
     let mut last_pushed = shared.borrow().revision();
     let mut last_title = shared.borrow().title();
     let mut last_poll = Instant::now();
+    // Handshake watchdog: re-push the document on a ladder until 'ready'
+    // arrives (harmless when the first push landed). Bounded so a truly
+    // dead bridge logs off instead of spinning forever.
+    const READY_RETRY_AFTER: Duration = Duration::from_millis(700);
+    const READY_RETRY_EVERY: Duration = Duration::from_millis(500);
+    const READY_RETRY_MAX: u32 = 20;
+    let started = Instant::now();
+    let mut ready_retry_at = started;
+    let mut ready_retries = 0u32;
     // Update-progress UI state: the toast switched to progress mode, and
     // how many installer lines have been mirrored into it so far.
     let mut update_ui_active = false;
@@ -408,6 +433,15 @@ pub fn run(file: Option<PathBuf>) {
             Event::MainEventsCleared => {
                 if exit.get() {
                     *control_flow = ControlFlow::Exit;
+                }
+                if !ready_seen.get()
+                    && started.elapsed() >= READY_RETRY_AFTER
+                    && ready_retry_at.elapsed() >= READY_RETRY_EVERY
+                    && ready_retries < READY_RETRY_MAX
+                {
+                    ready_retries += 1;
+                    ready_retry_at = Instant::now();
+                    push_document(&webview, &shared.borrow());
                 }
                 if show_close_prompt.replace(false) {
                     eval_script(&webview, "pound.setClosePrompt(true);".to_owned());
@@ -602,7 +636,7 @@ fn push_document(webview: &WebView, presenter: &Presenter) {
             json_str(&presenter.display_path()),
             json_str(&presenter.status_text()),
             presenter.is_dirty(),
-            presenter.is_plain(),
+            presenter.view_mode(),
             json_str(presenter.error_text()),
         ),
     );

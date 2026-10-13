@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::model::Model;
+use crate::model::{FileType, Model};
 
 /// What a navigation request in the rendered pane should do.
 ///
@@ -138,22 +138,24 @@ impl Presenter {
         self.model.reload_if_changed()
     }
 
-    /// Handle files dragged onto the window: prefer markdown files.
+    /// Handle files dragged onto the window: prefer markdown, then CSV,
+    /// else the last thing dropped.
     pub fn open_dropped(&mut self, paths: &[PathBuf]) {
-        let Some(path) = paths
-            .iter()
-            .rev()
-            .find(|p| {
-                matches!(
-                    p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()),
-                    Some(ext) if ext == "md" || ext == "markdown"
-                )
-            })
+        let prefer = |kind: FileType| paths.iter().rev().find(|p| FileType::from_path(p) == kind);
+        let Some(path) = prefer(FileType::Markdown)
+            .or_else(|| prefer(FileType::Csv))
             .or_else(|| paths.last())
         else {
             return;
         };
         self.open_path(path);
+    }
+
+    /// Sort the CSV table by a column (a header click in the shell); the
+    /// same column toggles the direction. Returns whether the table
+    /// changed (the caller re-pushes only then).
+    pub fn sort_csv(&mut self, column: usize) -> bool {
+        self.model.sort_csv(column)
     }
 
     /// Open a web/mailto link in the system browser, recording a banner
@@ -232,13 +234,16 @@ impl Presenter {
             .map_or_else(String::new, |doc| doc.path.display().to_string())
     }
 
-    /// Whether the document renders nothing and shows the source pane
-    /// alone (non-markdown text files).
-    pub fn is_plain(&self) -> bool {
-        self.model
-            .document
-            .as_ref()
-            .is_some_and(|doc| doc.is_plain())
+    /// The pane layout for the current document, as the shell knows it:
+    /// `"markdown"` (preview + source), `"plain"` (source only), `"csv"`
+    /// (rendered table only). `"markdown"` doubles as the no-document
+    /// shape (the welcome screen).
+    pub fn view_mode(&self) -> &'static str {
+        match self.model.document.as_ref().map(|doc| doc.file_type) {
+            Some(FileType::Csv) => "csv",
+            Some(FileType::Plain) => "plain",
+            Some(FileType::Markdown) | None => "markdown",
+        }
     }
 
     /// The window title: the document's name, `*`-prefixed while edits
@@ -257,12 +262,22 @@ impl Presenter {
     pub fn status_text(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
         if let Some(doc) = &self.model.document {
-            parts.push(format!(
-                "{} · {} characters · {} lines",
-                doc.type_label(),
-                group_digits(doc.source.chars().count()),
-                group_digits(doc.source.lines().count())
-            ));
+            if let Some((rows, columns)) = doc.shape {
+                // Tables: the shape is the friendly stat (character and
+                // line counts are noise for data).
+                parts.push(format!(
+                    "CSV · {} rows · {} columns",
+                    group_digits(rows),
+                    group_digits(columns)
+                ));
+            } else {
+                parts.push(format!(
+                    "{} · {} characters · {} lines",
+                    doc.type_label(),
+                    group_digits(doc.source.chars().count()),
+                    group_digits(doc.source.lines().count())
+                ));
+            }
         }
         if self.model.dirty {
             parts.push("edited".to_owned());
@@ -505,7 +520,7 @@ mod tests {
         assert_eq!(presenter.html(), "");
         assert_eq!(presenter.source(), "");
         assert_eq!(presenter.display_path(), "");
-        assert!(!presenter.is_plain());
+        assert_eq!(presenter.view_mode(), "markdown");
         assert!(!presenter.is_dirty());
         assert_eq!(presenter.revision(), 0);
         assert_eq!(presenter.document_path(), None);
@@ -515,7 +530,7 @@ mod tests {
         assert_eq!(presenter.source(), "# hello");
         assert_eq!(presenter.revision(), 1);
         assert!(!presenter.is_dirty());
-        assert!(!presenter.is_plain());
+        assert_eq!(presenter.view_mode(), "markdown");
         assert_eq!(
             presenter.document_path().unwrap().file_name(),
             Some(std::ffi::OsStr::new("view.md"))
@@ -532,7 +547,36 @@ mod tests {
         presenter.open_path(&txt);
         assert_eq!(presenter.html(), "");
         assert_eq!(presenter.source(), "just text");
-        assert!(presenter.is_plain());
+        assert_eq!(presenter.view_mode(), "plain");
+    }
+
+    #[test]
+    fn csv_documents_are_read_only_tables() {
+        let dir = std::env::temp_dir().join(format!("pound-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("table.csv");
+        std::fs::write(&path, "name,age\nada,36\nbob,25\n").unwrap();
+        let mut presenter = Presenter::new(Some(&path));
+
+        // Table-only layout, read-only by construction.
+        assert_eq!(presenter.view_mode(), "csv");
+        assert!(presenter.html().contains("<table class=\"csv\">"));
+        assert_eq!(presenter.source(), "name,age\nada,36\nbob,25\n");
+        assert!(!presenter.is_dirty());
+
+        // The status bar counts rows and columns, not characters.
+        assert_eq!(
+            presenter.status_text(),
+            format!("CSV · 2 rows · 2 columns · v{}", env!("CARGO_PKG_VERSION"))
+        );
+
+        // Sorting flows through the presenter and re-renders (toggling
+        // on a second click of the same header).
+        assert!(presenter.sort_csv(0));
+        assert!(presenter.html().contains("sort-asc"));
+        assert!(presenter.sort_csv(0));
+        assert!(presenter.html().contains("sort-desc"));
+        assert!(!presenter.is_dirty());
     }
 
     #[test]

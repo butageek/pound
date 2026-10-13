@@ -15,6 +15,19 @@ pub struct Document {
     /// The file used CRLF line endings. The editor buffer is LF (the DOM
     /// normalizes), so saving converts back to keep diffs noise-free.
     pub crlf: bool,
+    /// How this file renders and lays out (one source of truth for the
+    /// renderer, the pane layout and `type_label`).
+    pub file_type: FileType,
+    /// The file's shape for CSV documents — `(data rows, columns)`, the
+    /// whole file's, never the rendered cap; `None` otherwise.
+    pub shape: Option<(usize, usize)>,
+    /// The parsed table (CSV text): the renderer's input, kept so
+    /// re-sorting never re-reads the file. `None` for non-table
+    /// documents.
+    pub grid: Option<Vec<Vec<String>>>,
+    /// The CSV table's current sort (render state; drives re-rendering
+    /// on header clicks). `None` until the user sorts.
+    pub csv_sort: Option<crate::csv::Sort>,
 }
 
 impl Document {
@@ -23,16 +36,41 @@ impl Document {
             path.canonicalize()
                 .map_err(|e| format!("cannot open {}: {e}", path.display()))?,
         );
-        let source = fs::read_to_string(&absolute)
-            .map_err(|e| format!("cannot read {}: {e}", absolute.display()))?;
+        let bytes =
+            fs::read(&absolute).map_err(|e| format!("cannot read {}: {e}", absolute.display()))?;
+        let file_type = FileType::from_path(&absolute);
+        let (source, grid) = match file_type {
+            // CSV parses into a grid at load; re-sorting re-renders from
+            // the grid without touching the file again.
+            FileType::Csv => {
+                let source = decode_text(&bytes, &absolute)?;
+                let grid = crate::csv::parse_grid(&source);
+                (source, Some(grid))
+            }
+            FileType::Markdown | FileType::Plain => (decode_text(&bytes, &absolute)?, None),
+        };
         let modified = fs::metadata(&absolute).and_then(|m| m.modified()).ok();
         let crlf = source.contains("\r\n");
+        let (html, shape) = match file_type {
+            // Table documents always carry the grid parsed above;
+            // markdown renders text and plain files render nothing.
+            FileType::Csv => crate::csv::grid_to_html(grid.as_deref().unwrap_or(&[]), None),
+            FileType::Markdown => (
+                markdown::to_html(&source, absolute.parent().unwrap_or(Path::new("."))),
+                None,
+            ),
+            FileType::Plain => (String::new(), None),
+        };
         Ok(Document {
-            html: render(&absolute, &source),
+            html,
             path: absolute,
             source,
             modified,
             crlf,
+            file_type,
+            shape,
+            grid,
+            csv_sort: None,
         })
     }
 
@@ -44,47 +82,68 @@ impl Document {
             .unwrap_or_else(|| "untitled".to_string())
     }
 
-    /// Human-facing file type for the status bar, e.g. `Markdown` or `TXT file`.
+    /// Human-facing file type for the status bar, e.g. `Markdown`, `CSV`
+    /// or `TXT file`.
     pub fn type_label(&self) -> String {
-        if is_markdown_path(&self.path) {
-            return "Markdown".to_owned();
+        match self.file_type {
+            FileType::Markdown => "Markdown".to_owned(),
+            FileType::Csv => "CSV".to_owned(),
+            FileType::Plain => {
+                let ext = self
+                    .path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                match ext.as_str() {
+                    "txt" => "Plain text".to_owned(),
+                    "" => "File".to_owned(),
+                    other => format!("{} file", other.to_ascii_uppercase()),
+                }
+            }
         }
-        let ext = self
-            .path
+    }
+}
+
+/// Decode file bytes as UTF-8 text. Binary files (PDFs, .docx, images…)
+/// get a message that says what to do instead of Rust's "stream did not
+/// contain valid UTF-8".
+fn decode_text(bytes: &[u8], path: &Path) -> Result<String, String> {
+    String::from_utf8(bytes.to_vec()).map_err(|_| {
+        format!(
+            "cannot open {}: not a text file (Pound reads markdown and CSV)",
+            path.display()
+        )
+    })
+}
+
+/// The kinds of files Pound treats differently. One source of truth for
+/// the renderer, the pane layout and `type_label` (this enum replaces
+/// the old `is_markdown_path` booleans — CSV is why it exists).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileType {
+    /// Rendered preview plus an editable source pane, side by side.
+    Markdown,
+    /// Delimited text (`.csv`/`.tsv`) as a sanitized, sortable table —
+    /// the rendered pane is the whole view (data, not prose: no source
+    /// pane, nothing to edit).
+    Csv,
+    /// An editable source pane alone (a text file is its own source).
+    Plain,
+}
+
+impl FileType {
+    pub fn from_path(path: &Path) -> FileType {
+        let ext = path
             .extension()
             .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        match ext.as_str() {
-            "txt" => "Plain text".to_owned(),
-            "" => "File".to_owned(),
-            other => format!("{} file", other.to_ascii_uppercase()),
+            .map(|e| e.to_ascii_lowercase());
+        match ext.as_deref() {
+            Some("md" | "markdown") => FileType::Markdown,
+            Some("csv" | "tsv") => FileType::Csv,
+            _ => FileType::Plain,
         }
     }
-
-    /// Plain-text files render nothing; the view shows the source pane
-    /// alone (see `render`).
-    pub fn is_plain(&self) -> bool {
-        !is_markdown_path(&self.path)
-    }
-}
-
-/// Render a markdown file for the preview; plain-text files render
-/// nothing (`html` stays empty — the view shows the source pane alone).
-fn render(path: &Path, source: &str) -> String {
-    if is_markdown_path(path) {
-        markdown::to_html(source, path.parent().unwrap_or(Path::new(".")))
-    } else {
-        String::new()
-    }
-}
-
-/// The extensions this app treats as markdown. One source of truth for
-/// rendering, the plain/source-pane view mode and `type_label`.
-pub(crate) fn is_markdown_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown"))
 }
 
 /// `Path::canonicalize` returns Windows verbatim paths (`\\?\C:\…`,
@@ -155,9 +214,16 @@ impl Model {
             return;
         }
         doc.source = text.to_owned();
-        // render() no-ops for plain files (the source pane is the view),
-        // so this is safe for every document kind.
-        doc.html = render(&doc.path, &doc.source);
+        // Plain files render nothing (the source pane is the view), so
+        // this is safe for every editable kind. CSV documents are
+        // read-only: the shell posts no edits for them — there is no
+        // source pane to type in — so their grid never goes stale.
+        doc.html = match doc.file_type {
+            FileType::Markdown => {
+                markdown::to_html(&doc.source, doc.path.parent().unwrap_or(Path::new(".")))
+            }
+            _ => String::new(),
+        };
         self.revision += 1;
         self.dirty = true;
     }
@@ -212,14 +278,38 @@ impl Model {
             return false;
         }
         // An mtime touch with identical content (e.g. a save from another
-        // Pound window) must not reset the editor for no visible reason.
-        if fs::read_to_string(&doc.path).is_ok_and(|disk| disk == doc.source) {
+        // Pound window) must not reset the view for no visible reason.
+        if fs::read(&doc.path).is_ok_and(|disk| String::from_utf8_lossy(&disk) == doc.source) {
             if let Some(doc) = self.document.as_mut() {
                 doc.modified = Some(modified);
             }
             return false;
         }
         self.reload();
+        true
+    }
+
+    /// Re-render the CSV table under a new sort (a header click): the
+    /// same column toggles the direction. Works from the stored grid, so
+    /// no file re-read. Pure view state — never dirty, never saved.
+    /// Returns whether anything changed.
+    pub fn sort_csv(&mut self, column: usize) -> bool {
+        let Some(doc) = self.document.as_mut() else {
+            return false;
+        };
+        if !matches!(doc.file_type, FileType::Csv) {
+            return false;
+        }
+        // Same column again flips the direction; a new column starts
+        // ascending.
+        let ascending = match doc.csv_sort {
+            Some(sort) if sort.column == column => !sort.ascending,
+            _ => true,
+        };
+        doc.csv_sort = Some(crate::csv::Sort { column, ascending });
+        let (html, _) = crate::csv::grid_to_html(doc.grid.as_deref().unwrap_or(&[]), doc.csv_sort);
+        doc.html = html;
+        self.revision += 1;
         true
     }
 }
@@ -273,7 +363,7 @@ mod tests {
         let mut model = Model::default();
         model.open(&txt);
         let doc = model.document.as_ref().unwrap();
-        assert!(doc.is_plain());
+        assert_eq!(doc.file_type, FileType::Plain);
         assert_eq!(doc.html, "");
         assert_eq!(doc.source, "# not a heading\n*blob* <tag>\n");
 
@@ -289,8 +379,77 @@ mod tests {
         std::fs::write(&md, "# real heading\n").unwrap();
         model.open(&md);
         let doc = model.document.as_ref().unwrap();
-        assert!(!doc.is_plain());
+        assert_eq!(doc.file_type, FileType::Markdown);
         assert!(doc.html.contains("<h1>"));
+    }
+
+    #[test]
+    fn file_types_come_from_extensions() {
+        let f = |name: &str| FileType::from_path(&PathBuf::from(name));
+        assert_eq!(f("notes.md"), FileType::Markdown);
+        assert_eq!(f("NOTES.MARKDOWN"), FileType::Markdown); // case-insensitive
+        assert_eq!(f("data.csv"), FileType::Csv);
+        assert_eq!(f("data.TSV"), FileType::Csv);
+        assert_eq!(f("log.txt"), FileType::Plain);
+        assert_eq!(f("Makefile"), FileType::Plain); // no extension
+        assert_eq!(f("archive.tar.gz"), FileType::Plain);
+    }
+
+    #[test]
+    fn csv_documents_render_a_table() {
+        let dir = std::env::temp_dir().join(format!("pound-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("data.csv");
+        fs::write(&path, "name,age\nada,36\nbob,25\n").unwrap();
+        let mut model = Model::default();
+        model.open(&path);
+        let doc = model.document.as_ref().unwrap();
+        assert_eq!(doc.file_type, FileType::Csv);
+        assert_eq!(doc.type_label(), "CSV");
+        assert_eq!(doc.shape, Some((2, 2)));
+        assert!(doc.html.contains("<table class=\"csv\">"));
+        assert!(doc.html.contains("<th>name</th>"));
+        // Read-only by construction: no sort or edit ever marks it dirty.
+        assert!(!model.dirty);
+    }
+
+    #[test]
+    fn sort_csv_re_renders_and_toggles() {
+        let dir = std::env::temp_dir().join(format!("pound-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sortable.csv");
+        fs::write(&path, "n\n2\n1\n").unwrap();
+        let mut model = Model::default();
+        model.open(&path);
+        let revision = model.revision;
+
+        assert!(model.sort_csv(0));
+        assert_eq!(model.revision, revision + 1);
+        assert!(model.document.as_ref().unwrap().html.contains("sort-asc"));
+        assert!(!model.dirty, "sorting is view state, never an edit");
+
+        // Same column again: the direction flips.
+        assert!(model.sort_csv(0));
+        assert!(model.document.as_ref().unwrap().html.contains("sort-desc"));
+
+        // Non-CSV documents ignore it entirely.
+        let md = dir.join("plain-sort.md");
+        fs::write(&md, "# hi").unwrap();
+        model.open(&md);
+        assert!(!model.sort_csv(0));
+    }
+
+    #[test]
+    fn binary_files_get_an_actionable_error() {
+        let dir = std::env::temp_dir().join(format!("pound-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("brochure.pdf");
+        fs::write(&path, [0x25, 0x50, 0x44, 0x46, 0x00, 0x01, 0x02, 0xff]).unwrap();
+        let mut model = Model::default();
+        model.open(&path);
+        let error = model.error.as_deref().unwrap_or("");
+        assert!(error.contains("not a text file"), "{error}");
+        assert!(model.document.is_none());
     }
 
     #[test]
@@ -312,19 +471,24 @@ mod tests {
     #[test]
     fn type_label_names_common_types() {
         fn doc_with(ext: &str) -> Document {
+            let path = PathBuf::from(format!("C:\\notes.{ext}"));
             Document {
-                path: PathBuf::from(format!("C:\\notes.{ext}")),
+                path: path.clone(),
                 source: String::new(),
                 html: String::new(),
                 modified: None,
                 crlf: false,
+                file_type: FileType::from_path(&path),
+                shape: None,
+                grid: None,
+                csv_sort: None,
             }
         }
         assert_eq!(doc_with("md").type_label(), "Markdown");
         assert_eq!(doc_with("markdown").type_label(), "Markdown");
         assert_eq!(doc_with("txt").type_label(), "Plain text");
         assert_eq!(doc_with("json").type_label(), "JSON file");
-        assert_eq!(doc_with("csv").type_label(), "CSV file");
+        assert_eq!(doc_with("csv").type_label(), "CSV");
         assert_eq!(doc_with("").type_label(), "File");
     }
 
@@ -397,6 +561,10 @@ new **body**",
             html: String::new(),
             modified: None,
             crlf: false,
+            file_type: FileType::Markdown,
+            shape: None,
+            grid: None,
+            csv_sort: None,
         });
         model.dirty = true;
         model.save();
