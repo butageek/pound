@@ -85,9 +85,11 @@ Architecture is strict MVP
   (`csvColWidths`, re-applied in `setupCsvTable` and pinned before the
   scroll is restored — an unpinned table fits the pane and would clamp
   the sideways position away); tables wider than the pane scroll
-  horizontally with a sticky header, opting out of the markdown
-  `#content table` `display:block`/`max-width` rule (a clamped sum
-  makes the engine rescale every column together). Files beyond 10,000 data
+  horizontally with a sticky header. Table CSS is scoped per file type
+  (`body[data-mode=…]`): markdown's `display:block`/`max-width`
+  scrolling rule once leaked into the csv table and made the engine
+  rescale every column — modes must not inherit each other's table
+  box models. Files beyond 10,000 data
   rows render the cap plus a visible note; the status bar counts
   rows/columns (the file's true shape), never characters. Binary files
   (PDFs, .docx, ...) fail with an actionable message instead of Rust's
@@ -229,8 +231,13 @@ Architecture is strict MVP
   dialog via `pound.setClosePrompt(true)` instead of exiting. Its buttons
   post `save-and-exit` (the host saves first and only exits when the
   buffer is clean — a failed save keeps the app open with the banner) or
-  `exit`; Cancel posts `cancel-exit` to clear a pending update. The ipc
-  handlers set an `exit` flag (they run inside WebView2 message dispatch
+  `exit`; Cancel posts `cancel-exit` to clear a pending update. Both
+  answers resolve through `update::plan_exit` (unit-tested): only the
+  update flow (the toast's Update button armed the pending flag) may
+  run the installer on the way out; a plain close just saves or
+  discards and exits — an unconditional `begin_update` here once
+  turned every close into a reinstall + relaunch. The ipc handlers
+  set an `exit` flag (they run inside WebView2 message dispatch
   and cannot touch `ControlFlow`) which `MainEventsCleared` honors.
 - Right-click: WebView2's default context menu (Chromium's Copy / Print /
   empty "More tools" submenu) is disabled via

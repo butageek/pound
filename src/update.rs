@@ -11,6 +11,48 @@
 use std::path::Path;
 use std::sync::Mutex;
 
+/// An answer to the shell's close prompt ("unsaved changes").
+#[derive(Debug, PartialEq, Eq)]
+pub enum ClosePromptAnswer {
+    /// "Save" (save-and-exit): the host saved first; `saved` says
+    /// whether that succeeded.
+    Save { saved: bool },
+    /// "Don't save" (exit): discard the buffer and close.
+    Discard,
+}
+
+/// What the host should do after the close prompt is answered.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ExitPlan {
+    /// Exit in-process: a plain close — no installer, no relaunch.
+    Exit,
+    /// Keep the app open: the save behind "Save" failed (the banner
+    /// shows why); nothing is confirmed anymore.
+    KeepOpen,
+    /// Spawn the installer: this close came from the update toast. The
+    /// installer closes us at its replace step and relaunches,
+    /// re-opening the document via `-OpenPath`.
+    RunInstaller,
+}
+
+/// Resolve a close-prompt answer into what the host should do. Only the
+/// update flow (`update_pending`, armed by the toast's Update button,
+/// cleared by Cancel) may run the installer — a plain window close
+/// (the X button) must just save or discard and exit. The caller
+/// treats the flag as one-shot.
+pub fn plan_exit(answer: ClosePromptAnswer, update_pending: bool) -> ExitPlan {
+    match answer {
+        ClosePromptAnswer::Save { saved: false } => ExitPlan::KeepOpen,
+        ClosePromptAnswer::Save { saved: true } | ClosePromptAnswer::Discard => {
+            if update_pending {
+                ExitPlan::RunInstaller
+            } else {
+                ExitPlan::Exit
+            }
+        }
+    }
+}
+
 /// Compare two versions ("v0.4.1" or "0.4.1"). Anything unparseable
 /// (garbage, prerelease suffixes) counts as "not newer" so it can never
 /// nag the user into a bogus update.
@@ -157,6 +199,41 @@ mod tests {
         assert!(!is_newer("garbage", "0.4.0"));
         assert!(!is_newer("v0.5.0-beta", "0.4.0")); // prerelease: never nag
         assert!(!is_newer("", "0.4.0"));
+    }
+
+    #[test]
+    fn plain_closes_save_or_discard_and_just_exit() {
+        assert_eq!(plan_exit(ClosePromptAnswer::Discard, false), ExitPlan::Exit);
+        assert_eq!(
+            plan_exit(ClosePromptAnswer::Save { saved: true }, false),
+            ExitPlan::Exit
+        );
+    }
+
+    #[test]
+    fn a_failed_save_keeps_the_app_open() {
+        assert_eq!(
+            plan_exit(ClosePromptAnswer::Save { saved: false }, false),
+            ExitPlan::KeepOpen
+        );
+        // Even with an update pending: the buffer is still unsaved, and
+        // the user has not confirmed discarding anything.
+        assert_eq!(
+            plan_exit(ClosePromptAnswer::Save { saved: false }, true),
+            ExitPlan::KeepOpen
+        );
+    }
+
+    #[test]
+    fn only_the_update_flow_runs_the_installer() {
+        assert_eq!(
+            plan_exit(ClosePromptAnswer::Discard, true),
+            ExitPlan::RunInstaller
+        );
+        assert_eq!(
+            plan_exit(ClosePromptAnswer::Save { saved: true }, true),
+            ExitPlan::RunInstaller
+        );
     }
 
     #[cfg(windows)]

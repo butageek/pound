@@ -330,51 +330,60 @@
     margin: 0 0 16px; padding: 0 1em; color: var(--muted);
     border-left: .25em solid var(--border);
   }
-  #content table {
+  /* Markdown tables are block boxes that scroll in their own pane when
+     wider than it. Scoped to markdown mode — each file type owns its
+     table rules — after max-width here clamped the CSV table's pinned
+     column sum and the engine rescaled every column (fixed in v0.16.1). */
+  body[data-mode="markdown"] #content table {
     border-collapse: collapse; display: block; max-width: 100%;
     overflow: auto; margin: 0 0 16px;
   }
-  #content th, #content td { border: 1px solid var(--border); padding: 6px 13px; }
-  #content th { background: var(--th-bg); font-weight: 600; }
+  body[data-mode="markdown"] #content th,
+  body[data-mode="markdown"] #content td { border: 1px solid var(--border); padding: 6px 13px; }
+  body[data-mode="markdown"] #content th { background: var(--th-bg); font-weight: 600; }
 
-  /* ---- CSV tables (the csv-mode view; the HTML comes from csv.rs) ---- */
-  #content table.csv {
+  /* ---- CSV tables (the csv-mode view; the HTML comes from csv.rs) ----
+     Scoped to csv mode, symmetric with markdown's table rules above:
+     one file type, one rule set. Modes must not inherit each other's
+     table box models (that is how max-width once rescaled every CSV
+     column), and future file types start from a clean slate. */
+  body[data-mode="csv"] #content table.csv {
     /* fixed layout: columns follow the <col> px widths the shell sets;
        the table width is pinned to their sum (see applyCsvWidths), so
-       columns never stretch or shrink to fit the pane. display/max-width
-       opt out of the markdown "#content table" scrolling rule above:
-       its max-width would clamp the sum, and Chromium then rescales every
-       fixed-layout column proportionally — resizing one would resize
-       them all again. */
+       columns never stretch or shrink to fit the pane */
     table-layout: fixed; border-collapse: collapse; width: 100%;
-    display: table; max-width: none; overflow: visible;
     margin: 0 0 18px;
   }
-  #content table.csv th, #content table.csv td {
+  body[data-mode="csv"] #content table.csv th,
+  body[data-mode="csv"] #content table.csv td {
     border: 1px solid var(--border); padding: 5px 10px;
     /* wide cells clip with an ellipsis — resize the column to see more */
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  #content table.csv thead th {
+  body[data-mode="csv"] #content table.csv thead th {
     position: sticky; top: 0; z-index: 1; background: var(--th-bg);
     cursor: pointer; user-select: none; text-align: left;
   }
-  #content table.csv thead th:hover { background: var(--hover); }
-  #content table.csv th.sort-asc::after { content: " \2191"; }  /* ↑ */
-  #content table.csv th.sort-desc::after { content: " \2193"; } /* ↓ */
-  #content table.csv th.num, #content table.csv td.num {
+  body[data-mode="csv"] #content table.csv thead th:hover { background: var(--hover); }
+  body[data-mode="csv"] #content table.csv th.sort-asc::after { content: " \2191"; }  /* ↑ */
+  body[data-mode="csv"] #content table.csv th.sort-desc::after { content: " \2193"; } /* ↓ */
+  body[data-mode="csv"] #content table.csv th.num,
+  body[data-mode="csv"] #content table.csv td.num {
     text-align: right; font-variant-numeric: tabular-nums;
   }
-  #content table.csv tbody tr:nth-child(even) td { background: var(--hover); }
+  body[data-mode="csv"] #content table.csv tbody tr:nth-child(even) td {
+    background: var(--hover);
+  }
   /* The drag handle lives on the header's right edge (added by the
      shell, so it never goes through the sanitizer); sticky th is the
      positioning context. */
-  #content table.csv th .col-resizer {
+  body[data-mode="csv"] #content table.csv th .col-resizer {
     position: absolute; top: 0; right: 0; width: 8px; height: 100%;
     cursor: col-resize;
   }
-  #content table.csv th .col-resizer:hover { background: var(--hover); }
-  #content .csv-note, #content .csv-empty {
+  body[data-mode="csv"] #content table.csv th .col-resizer:hover { background: var(--hover); }
+  body[data-mode="csv"] #content .csv-note,
+  body[data-mode="csv"] #content .csv-empty {
     color: var(--muted); font-size: 0.9em; margin: 10px 2px 0;
   }
   #content img { max-width: 100%; }

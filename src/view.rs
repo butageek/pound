@@ -31,7 +31,7 @@ use crate::ipc::{self, json_str};
 use crate::presenter::{link_action, LinkAction, Presenter};
 use crate::register;
 use crate::theme::{DarkPalette, LightPalette, Settings, Theme};
-use crate::update;
+use crate::update::{self, plan_exit, ClosePromptAnswer, ExitPlan};
 /// The shell with the persisted settings and the installed font list
 /// injected (`window.poundSettings` / `window.poundFonts`): the head
 /// script resolves the theme and font before first paint, so the app
@@ -238,21 +238,40 @@ pub fn run(file: Option<PathBuf>) {
                 presenter.save();
                 let saved = !presenter.is_dirty();
                 drop(presenter);
-                if saved {
-                    // Progress mode: the installer closes us at the replace
-                    // step; a failed spawn falls back to a plain close.
-                    if !begin_update(open_path.as_deref()) {
-                        ipc_exit.set(true);
+                // A plain close saves and exits; only the update flow
+                // (its Update button armed the pending flag) may run the
+                // installer on the way out. A failed save keeps the app
+                // open with the banner.
+                match plan_exit(
+                    ClosePromptAnswer::Save { saved },
+                    ipc_update_on_exit.replace(false),
+                ) {
+                    ExitPlan::KeepOpen => ipc_preview.set(true),
+                    ExitPlan::RunInstaller => {
+                        // Progress mode: the installer closes us at the
+                        // replace step; a failed spawn falls back to a
+                        // plain close.
+                        if !begin_update(open_path.as_deref()) {
+                            ipc_exit.set(true);
+                        }
                     }
-                } else {
-                    // The save failed (banner shows why): stay open.
-                    ipc_preview.set(true);
+                    ExitPlan::Exit => ipc_exit.set(true),
                 }
             }
             ipc::Message::Exit => {
-                let open_path = ipc_presenter.borrow().document_path();
-                if !begin_update(open_path.as_deref()) {
-                    ipc_exit.set(true);
+                // Same rule as SaveAndExit: discard-and-close exits
+                // unless an update is actually pending.
+                match plan_exit(
+                    ClosePromptAnswer::Discard,
+                    ipc_update_on_exit.replace(false),
+                ) {
+                    ExitPlan::RunInstaller => {
+                        let open_path = ipc_presenter.borrow().document_path();
+                        if !begin_update(open_path.as_deref()) {
+                            ipc_exit.set(true);
+                        }
+                    }
+                    _ => ipc_exit.set(true),
                 }
             }
             ipc::Message::Update => {
