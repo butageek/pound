@@ -71,7 +71,6 @@
     display: flex; align-items: center; gap: 10px; padding: 0 14px;
     background: var(--bg); border-bottom: 1px solid var(--border);
   }
-  #topbar .brand { font-weight: 600; font-size: 14px; margin-right: 2px; }
   #topbar button {
     font: 13px "Segoe UI", system-ui, sans-serif; color: var(--text);
     background: transparent; border: 1px solid var(--border); border-radius: 6px;
@@ -340,8 +339,9 @@
 
   /* ---- CSV tables (the csv-mode view; the HTML comes from csv.rs) ---- */
   #content table.csv {
-    /* fixed layout: columns follow the <col> widths the shell sets
-       (equal shares to start, dragged widths after that) */
+    /* fixed layout: columns follow the <col> px widths the shell sets;
+       the table width is pinned to their sum (see applyCsvWidths), so
+       columns never stretch or shrink to fit the pane */
     table-layout: fixed; border-collapse: collapse; width: 100%;
     margin: 0 0 18px;
   }
@@ -415,9 +415,8 @@
 </head>
 <body data-mode="markdown">
   <div id="topbar">
-    <span class="brand">Pound</span>
-    <span class="spacer"></span>
     <button id="settings-open" type="button">Settings</button>
+    <span class="spacer"></span>
     <button id="save" type="button" disabled>Save <kbd>Ctrl+S</kbd></button>
     <label class="toggle">
       <input type="checkbox" id="source-toggle"> Source <kbd>Ctrl+U</kbd>
@@ -549,8 +548,10 @@
     setRendered(html, status, edited) {
       const wrap = document.getElementById('content-wrap');
       const scroll = wrap.scrollTop;
+      const scrollX = wrap.scrollLeft;
       document.getElementById('content').innerHTML = html;
       wrap.scrollTop = scroll;
+      wrap.scrollLeft = scrollX; // a CSV sort must not jump sideways either
       document.getElementById('status-info').textContent = status;
       setSaveEnabled(edited);
       addCopyButtons();
@@ -784,26 +785,96 @@
   // every other intent. Column widths are pure layout, so they live
   // here and survive re-renders (a sort rebuilds the table; the widths
   // and scroll position are re-applied afterwards).
-  let csvColWidths = null; // per-column CSS widths, kept across sorts
+  // Widths are strictly per column: every <col> carries its own bounded
+  // px width and the table is exactly their sum, so dragging one grip
+  // changes that column alone (percentage shares resized them all).
+  const CSV_MIN_COL = 40;  // px floor: a narrow column still shows something
+  const CSV_MAX_COL = 400; // px cap: one long column cannot eat the pane
+  const clampCol = w => Math.min(CSV_MAX_COL, Math.max(CSV_MIN_COL, w));
+  let csvColWidths = null; // per-column px widths, kept across sorts
   const saveCsvWidths = () => {
     const cols = document.querySelectorAll('#content table.csv colgroup col');
     csvColWidths = cols.length ? [...cols].map(c => c.style.width || '') : null;
   };
+  // Default widths: fit each column's widest cell within the bounds,
+  // then spend the leftover pane width on columns below the cap, so a
+  // narrow file fills the pane instead of leaving a gap on the right.
+  function defaultCsvWidths(table, cols) {
+    const widths = measureCsvColumns(table, cols).map(clampCol);
+    const content = document.getElementById('content');
+    const cs = getComputedStyle(content);
+    const avail = content.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+    const sum = () => widths.reduce((a, b) => a + b, 0);
+    // Hand out the leftover proportionally; a pass that cannot spend it
+    // all caps at least one column, so the loop terminates.
+    while (sum() < avail) {
+      const open = widths.map((w, i) => [w, i]).filter(([w]) => w < CSV_MAX_COL);
+      if (!open.length) break; // every column is at the cap already
+      const openSum = open.reduce((a, [w]) => a + w, 0);
+      const extra = avail - sum();
+      let spent = 0;
+      for (const [w, i] of open) {
+        const add = Math.min(extra * (w / openSum), CSV_MAX_COL - w);
+        widths[i] = w + add;
+        spent += add;
+      }
+      if (spent < 1) break; // rounding dust: not worth another pass
+    }
+    return widths.map(w => Math.round(w) + 'px');
+  }
+  // The widest content of each column in px, measured with a scratch
+  // canvas in the table's own fonts (headers are bold, and a header may
+  // later grow a sort arrow) — measuring strings instead of laying out
+  // the table keeps this cheap even at the 10k-row cap.
+  function measureCsvColumns(table, cols) {
+    const widths = Array.from(cols, () => 0);
+    const ctx = document.createElement('canvas').getContext('2d');
+    const ARROW = 14; // room for the ↑/↓ a sorted header grows
+    let charW = 0; // px upper bound of one glyph in the current font
+    const useFontOf = cell => {
+      const s = getComputedStyle(cell);
+      ctx.font = s.fontWeight + ' ' + s.fontSize + ' ' + s.fontFamily;
+      charW = ctx.measureText('W').width;
+    };
+    for (const section of [table.tHead, table.tBodies[0]]) {
+      if (!section?.rows.length || !section.rows[0].cells.length) continue;
+      useFontOf(section.rows[0].cells[0]);
+      const extra = section === table.tHead ? ARROW : 0;
+      for (const row of section.rows) {
+        for (let c = 0; c < row.cells.length && c < cols.length; c++) {
+          const text = row.cells[c].textContent;
+          // Cheap bound first: most cells cannot beat the running max.
+          if (text.length * charW + extra <= widths[c]) continue;
+          widths[c] = Math.max(widths[c], ctx.measureText(text).width + extra);
+        }
+      }
+    }
+    // Cell padding plus the collapsed borders ride on top of the text
+    // (a csv.rs table always pairs its <col>s with header cells).
+    const cs = getComputedStyle(table.querySelector('th, td'));
+    const pad = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) + 2;
+    return widths.map(w => w + pad);
+  }
+  // Pin the widths: every column keeps its own px width and the table
+  // exactly their sum (fixed layout + explicit width — the pane scrolls
+  // when the sum outgrows it, and no column ever moves for another).
+  function applyCsvWidths(table) {
+    const cols = table.querySelectorAll('colgroup col');
+    let sum = 0;
+    cols.forEach((c, i) => {
+      const w = parseFloat(csvColWidths[i]) || CSV_MIN_COL;
+      c.style.width = w + 'px';
+      sum += w;
+    });
+    table.style.width = Math.round(sum) + 'px';
+  }
   function setupCsvTable() {
     const table = document.querySelector('#content table.csv');
     if (!table) return;
     const cols = table.querySelectorAll('colgroup col');
     if (cols.length) {
-      // Wide tables grow past the pane so their columns stay readable;
-      // the pane scrolls sideways (see the overflow-x rule).
-      table.style.minWidth = cols.length * 72 + 'px';
-      if (csvColWidths && csvColWidths.length === cols.length) {
-        cols.forEach((c, i) => (c.style.width = csvColWidths[i]));
-      } else {
-        // Equal shares to start.
-        const even = 100 / cols.length;
-        cols.forEach(c => (c.style.width = even + '%'));
-      }
+      if (csvColWidths?.length !== cols.length) csvColWidths = defaultCsvWidths(table, cols);
+      applyCsvWidths(table);
     }
     table.querySelectorAll('thead th').forEach(th => {
       if (th.querySelector('.col-resizer')) return;
@@ -816,12 +887,16 @@
   function startColResize(e, th, table) {
     e.preventDefault();
     e.stopPropagation();
-    const col = table.querySelectorAll('colgroup col')[th.cellIndex];
+    const idx = th.cellIndex;
+    const col = table.querySelectorAll('colgroup col')[idx];
     if (!col) return;
     const startX = e.clientX;
     const startW = th.getBoundingClientRect().width;
     const move = ev => {
-      col.style.width = Math.max(40, startW + ev.clientX - startX) + 'px';
+      // Only this column moves, within the same bounds as the defaults;
+      // applyCsvWidths re-pins it and the table's width — nothing else.
+      csvColWidths[idx] = clampCol(startW + ev.clientX - startX) + 'px';
+      applyCsvWidths(table);
     };
     const up = () => {
       removeEventListener('mousemove', move);

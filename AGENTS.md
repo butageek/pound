@@ -75,11 +75,15 @@ Architecture is strict MVP
   under the new sort (same column toggles direction) and the usual
   preview push delivers it; numeric columns (every non-empty value
   parses) sort numerically, empties sink. **Column widths** are pure
-  layout and live in the shell: equal shares initially, drag the
-  header's right edge to resize (min 40px), and the widths + scroll
-  survive the sort's re-render (`csvColWidths`, re-applied in
-  `setupCsvTable`). Wide tables get a per-column min-width so the pane
-  scrolls horizontally with a sticky header. Files beyond 10,000 data
+  layout and live in the shell: each column opens at a content-fit
+  default (the widest cell, canvas-measured in the table's fonts,
+  clamped to 40–400 px; leftover pane width goes to uncapped columns
+  so narrow files fill the pane). Dragging a header's edge resizes
+  only that column (same bounds): every column carries its own px
+  width and the table is exactly their sum — no percentage shares
+  couple them. The widths + scroll survive the sort's re-render
+  (`csvColWidths`, re-applied in `setupCsvTable`); tables wider than the
+  pane scroll horizontally with a sticky header. Files beyond 10,000 data
   rows render the cap plus a visible note; the status bar counts
   rows/columns (the file's true shape), never characters. Binary files
   (PDFs, .docx, ...) fail with an actionable message instead of Rust's
@@ -172,7 +176,8 @@ Architecture is strict MVP
   shows `edited`, plus `changed on disk` when the file was modified
   externally (saving resolves it, last writer wins); a same-content mtime
   touch never reloads. The window title prefixes `*` while unsaved.
-- Themes: a **Settings** page (top-bar button) with the Zed-style model:
+- Themes: a **Settings** page (the top bar's leftmost button) with the
+  Zed-style model:
   the mode (Auto / Light / Dark) plus a palette per mode — light:
   Solarized or Catppuccin Latte; dark: One Dark or Catppuccin Mocha.
   Changes apply live and persist immediately
