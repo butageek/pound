@@ -278,8 +278,8 @@ else {
 if ($Relaunch) {
     Write-Step 'Relaunching Pound'
     # ProcessStartInfo.Arguments is the RAW command line. Start-Process
-    # re-quotes -ArgumentList elements and eats pre-embedded quotes,
-    # so a quoted path arrived as literal `"...`"` characters and pound
+    # re-quotes -ArgumentList elements and eats pre-embedded quotes, so
+    # the path arrived with literal quote characters and pound
     # relaunched without its file. The .NET API passes it through.
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $targetExe

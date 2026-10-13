@@ -44,14 +44,13 @@ const TABLE_PROG_ID: &str = "Pound.table";
 const APP_NAME: &str = "Pound";
 const APP_DESCRIPTION: &str = "Viewer for markdown and CSV files";
 
-/// The human description shown for a ProgId.
-fn prog_id_description(prog_id: &str) -> &'static str {
-    if prog_id == TABLE_PROG_ID {
-        "Pound Data Table"
-    } else {
-        "Pound Markdown Document"
-    }
-}
+/// The ProgIds Pound writes, with their Explorer-facing descriptions.
+/// `Pound.md` predates the table views (installed users already carry
+/// it, and `--default` still keys off it); the data formats share one.
+const PROG_IDS: &[(&str, &str)] = &[
+    (PROG_ID, "Pound Markdown Document"),
+    (TABLE_PROG_ID, "Pound Data Table"),
+];
 
 fn exe_path() -> Result<PathBuf, String> {
     std::env::current_exe().map_err(|e| format!("cannot locate the pound executable: {e}"))
@@ -64,13 +63,12 @@ fn quoted(path: &PathBuf) -> String {
 /// println!, but tolerant of a closed stdout: installers capture this
 /// output via redirected pipes and sometimes close them early, and a
 /// print panic would fail an otherwise successful registration.
+/// (`writeln!` returns an error instead of panicking; errors ignored.)
 fn say(line: &str) {
     use std::io::Write;
     let mut out = std::io::stdout();
-    let written = out.write_all(line.as_bytes());
-    let _ = written
-        .and_then(|()| out.write_all(b"\n"))
-        .and_then(|()| out.flush());
+    let _ = writeln!(out, "{line}");
+    let _ = out.flush();
 }
 
 fn ctx(what: &str, e: io::Error) -> String {
@@ -205,11 +203,11 @@ pub fn register(set_default: bool) -> Result<(), String> {
         .map_err(|e| ctx("open HKCU\\Software\\Classes", e))?
         .0;
 
-    for prog_id in [PROG_ID, TABLE_PROG_ID] {
+    for (prog_id, description) in PROG_IDS {
         let (key, _) = classes
             .create_subkey(prog_id)
             .map_err(|e| ctx("create ProgId", e))?;
-        key.set_value("", &prog_id_description(prog_id))
+        key.set_value("", description)
             .map_err(|e| ctx("describe ProgId", e))?;
 
         let (icon, _) = key
@@ -312,7 +310,7 @@ pub fn unregister() -> Result<(), String> {
 
     // ProgId trees.
     if let Ok(classes) = hkcu.open_subkey_with_flags("Software\\Classes", KEY_READ) {
-        for prog_id in [PROG_ID, TABLE_PROG_ID] {
+        for (prog_id, _) in PROG_IDS {
             delete_tree(&classes, prog_id);
         }
 
@@ -325,12 +323,12 @@ pub fn unregister() -> Result<(), String> {
             if let Ok(owp) = class.open_subkey_with_flags("OpenWithProgids", KEY_SET_VALUE) {
                 let _ = owp.delete_value(prog_id);
             }
-            if *ext == ".md" {
-                if let Ok(current) = class.get_value::<String, _>("") {
-                    if current == *prog_id {
-                        let _ = class.delete_value("");
-                    }
-                }
+            if *ext == ".md"
+                && class
+                    .get_value::<String, _>("")
+                    .is_ok_and(|v| v == *prog_id)
+            {
+                let _ = class.delete_value("");
             }
         }
     }
