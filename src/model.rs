@@ -626,8 +626,15 @@ new **body**",
         let revision = model.revision;
 
         // The export returns the file it wrote (the toast points there).
+        // The document's path is canonicalized (long form) while the
+        // test's temp path may be 8.3 short on Windows (RUNNER~1) —
+        // compare against the document's own path, the documented CI
+        // trap (same dir, different strings).
         let target = model.export_html().unwrap();
-        assert_eq!(target, path.with_extension("html"));
+        assert_eq!(
+            target,
+            model.document.as_ref().unwrap().path.with_extension("html")
+        );
         let page = fs::read_to_string(&target).unwrap();
         assert!(page.starts_with("<!doctype html>"));
         assert!(page.contains("<h1>Export me</h1>"));
