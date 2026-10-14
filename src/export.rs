@@ -10,7 +10,7 @@
 //! and nothing references Pound: the file renders identically in any
 //! browser with no network, no assets, no scripts.
 
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use crate::markdown;
 
@@ -64,12 +64,15 @@ fn delocalize_images(html: &str, base_dir: &Path) -> String {
         };
         let encoded = &rest[url_start..url_start + len];
         let decoded = markdown::percent_decode(encoded).unwrap_or_else(|| encoded.to_owned());
+        // Windows trap (see AGENTS.md): the renderer canonicalized this
+        // path, so it carries the `\\?\` verbatim prefix, while the
+        // document's own path (our base_dir) was stripped at load —
+        // strip it too or the two share no prefix and relativizing
+        // falls apart into a broken `//%3F/C%3A/…` URL.
+        let image = crate::model::strip_verbatim_prefix(PathBuf::from(decoded));
         out.push_str(&rest[..start]);
         out.push_str("src=\"");
-        out.push_str(&encode_url_path(&relative_to(
-            Path::new(&decoded),
-            base_dir,
-        )));
+        out.push_str(&encode_url_path(&relative_to(&image, base_dir)));
         rest = &rest[url_start + len..]; // keeps the closing quote
     }
     out.push_str(rest);
@@ -223,7 +226,10 @@ mod tests {
             .join(format!("pound-test-{}", std::process::id()))
             .join(name);
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        // Canonicalize like Document::load does: temp dirs can arrive in
+        // 8.3 short form on Windows, which would not prefix-match the
+        // images' canonicalized long-form paths (the same verbatim trap).
+        dir.canonicalize().unwrap()
     }
 
     #[test]
@@ -306,6 +312,22 @@ mod tests {
         assert!(!html.contains("<script"), "{html}");
         assert!(!html.contains("onclick"), "{html}");
         assert!(html.contains("<b>bold</b>"), "{html}");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn verbatim_image_prefixes_do_not_break_relativization() {
+        // The renderer's URLs carry the `\\?\` verbatim prefix on Windows
+        // while the document's own path (the base) does not; without the
+        // strip the two share no prefix and the rewrite degrades to a
+        // broken `//%3F/C%3A/…` absolute URL (this cost the first v0.17.0
+        // tag its release run).
+        let html = format!(
+            r#"<p><img {}%5C%5C%3F%5CC%3A%5Cdocs%5Cimg%201.png" alt="x"></p>"#,
+            IMG_SRC
+        );
+        let out = delocalize_images(&html, Path::new(r"C:\docs"));
+        assert!(out.contains(r#"src="img%201.png""#), "{out}");
     }
 
     #[test]
