@@ -241,7 +241,7 @@
     flex: 1 1 0; min-width: 0;
     overflow-y: auto; scrollbar-gutter: stable; background: var(--bg);
   }
-  #source-wrap { display: none; flex: 1 1 0; min-width: 0; background: var(--bg); }
+  #source-wrap { display: none; position: relative; flex: 1 1 0; min-width: 0; background: var(--bg); }
   body.split #source-wrap { display: block; }
   /* Pane layouts by document kind (body[data-mode]):
      plain — a text file IS its own source: the editable pane is the
@@ -249,11 +249,17 @@
              toggle). The leftover `split` class is overridden rather
              than removed, so the toggle state survives when a markdown
              file is opened next.
+     code  — same single editor pane, but highlighted in place: the
+             #source-highlight overlay paints the colors behind the
+             (transparent-text) textarea. No rendered pane, no toggle.
      csv   — a data table, not prose: the rendered table is the whole
              view; no source pane, no toggle, no Save (read-only). */
   body[data-mode="plain"] #content-wrap { display: none; }
   body[data-mode="plain"] #source-wrap { display: block; }
   body[data-mode="plain"] #topbar .toggle { display: none; }
+  body[data-mode="code"] #content-wrap { display: none; }
+  body[data-mode="code"] #source-wrap { display: block; }
+  body[data-mode="code"] #topbar .toggle { display: none; }
   body[data-mode="csv"] #source-wrap { display: none; }
   body[data-mode="csv"] #topbar .toggle,
   body[data-mode="csv"] #topbar #save { display: none; }
@@ -280,6 +286,29 @@
     white-space: pre; tab-size: 4;
     overflow: auto; scrollbar-gutter: stable;
   }
+
+  /* The code-mode highlight overlay: a pre exactly mirroring the
+     textarea's metrics (same font, size, line-height, padding,
+     white-space, tab-size) painted behind it — the textarea's text is
+     transparent in code mode, its caret visible, and this pre shows the
+     colored text. It never scrolls itself (overflow hidden, positioned
+     by the textarea's scroll events) and never takes input. */
+  #source-highlight {
+    display: none; margin: 0; padding: 14px 18px 60px; border: 0;
+    font-family: var(--mono-font); font-size: var(--font-size);
+    line-height: 1.6; white-space: pre; tab-size: 4;
+    color: var(--text); overflow: hidden;
+  }
+  body[data-mode="code"] #source-highlight {
+    display: block; position: absolute; inset: 0;
+    pointer-events: none; user-select: none;
+  }
+  body[data-mode="code"] #source {
+    position: relative; /* stacked above the overlay pre */
+    color: transparent;
+    caret-color: var(--text);
+  }
+  body[data-mode="code"] #source::selection { background: rgba(128,128,128,0.35); }
 
   /* ---- status bar ---- */
   #statusbar {
@@ -337,14 +366,20 @@
      so .type comes first ("storage type" keywords keep the keyword
      color) and function colors need token pairs — `meta function`
      wraps whole function bodies and must not match. */
-  #content pre .type { color: var(--syn-type); }
-  #content pre .keyword, #content pre .storage { color: var(--syn-keyword); }
-  #content pre .string { color: var(--syn-string); }
-  #content pre .comment { color: var(--syn-comment); font-style: italic; }
-  #content pre .constant { color: var(--syn-constant); }
+  /* "#content pre" = markdown's rendered code blocks;
+     "#source-highlight" = the code-mode editor overlay. */
+  #content pre .type, #source-highlight .type { color: var(--syn-type); }
+  #content pre .keyword, #content pre .storage,
+  #source-highlight .keyword, #source-highlight .storage { color: var(--syn-keyword); }
+  #content pre .string, #source-highlight .string { color: var(--syn-string); }
+  #content pre .comment, #source-highlight .comment { color: var(--syn-comment); font-style: italic; }
+  #content pre .constant, #source-highlight .constant { color: var(--syn-constant); }
   #content pre .entity.function,
   #content pre .support.function,
-  #content pre .variable.function { color: var(--syn-function); }
+  #content pre .variable.function,
+  #source-highlight .entity.function,
+  #source-highlight .support.function,
+  #source-highlight .variable.function { color: var(--syn-function); }
   #content pre .copy-btn {
     position: absolute; top: 6px; right: 6px; opacity: 0;
     font: 11px "Segoe UI", sans-serif; color: var(--muted);
@@ -473,7 +508,10 @@
       </div>
       <article id="content"></article>
     </div>
-    <div id="source-wrap"><textarea id="source" wrap="off" spellcheck="false"></textarea></div>
+    <div id="source-wrap">
+      <pre id="source-highlight" aria-hidden="true"></pre>
+      <textarea id="source" wrap="off" spellcheck="false"></textarea>
+    </div>
   </div>
   <div id="statusbar">
     <span id="status-path"></span>
@@ -577,6 +615,9 @@
       // Park the caret at the top: a value assignment leaves it at the
       // end, so the first focus would auto-scroll the pane to the bottom.
       sourceEl.setSelectionRange(0, 0);
+      // Code files highlight in the editor itself: the overlay pre
+      // takes the host's colored block; other modes clear it.
+      setCodeHighlight(mode === 'code' ? html : null);
       const statusPath = document.getElementById('status-path');
       statusPath.textContent = path || 'Ready';
       statusPath.title = path; // hover tooltip: the untruncated path
@@ -601,21 +642,29 @@
     // arrives here too (same flow): the table is rebuilt, so the shell
     // re-applies its column widths — only the sort order changed.
     setRendered(html, status, edited) {
-      const wrap = document.getElementById('content-wrap');
-      const scroll = wrap.scrollTop;
-      const scrollX = wrap.scrollLeft;
-      document.getElementById('content').innerHTML = html;
-      // Size the table before restoring the scroll (same reason as in
-      // setContent): only a pinned table can hold a sideways position.
-      if (document.body.dataset.mode === 'csv') setupCsvTable();
-      wrap.scrollTop = scroll;
-      wrap.scrollLeft = scrollX; // a CSV sort must not jump sideways either
+      const mode = document.body.dataset.mode;
+      if (mode === 'code') {
+        // Code files render into the editor's overlay, not a preview
+        // pane — and the textarea is never touched, so its caret,
+        // selection, undo and scroll all survive (as ever).
+        setCodeHighlight(html);
+      } else {
+        const wrap = document.getElementById('content-wrap');
+        const scroll = wrap.scrollTop;
+        const scrollX = wrap.scrollLeft;
+        document.getElementById('content').innerHTML = html;
+        // Size the table before restoring the scroll (same reason as in
+        // setContent): only a pinned table can hold a sideways position.
+        if (mode === 'csv') setupCsvTable();
+        wrap.scrollTop = scroll;
+        wrap.scrollLeft = scrollX; // a CSV sort must not jump sideways either
+        addCopyButtons();
+      }
       document.getElementById('status-info').textContent = status;
       setSaveEnabled(edited);
       // Typing can empty or fill the render: keep Export in step (the
       // mode itself never changes here).
-      setExportEnabled(document.body.dataset.mode === 'markdown' && !!html);
-      addCopyButtons();
+      setExportEnabled(mode === 'markdown' && !!html);
     },
     setError(msg) {
       const el = document.getElementById('error');
@@ -721,12 +770,13 @@
 
   const toggle = document.getElementById('source-toggle');
   const applySplit = () => {
-    // Plain files show only the source pane and CSV files only the
-    // rendered table; in neither is there anything to toggle. With no
-    // document either (welcome), the toggle is hidden and Ctrl+U must
-    // not smuggle an unusable editor pane in. Drop the split class
-    // too, so a later markdown file does not open with a source pane
-    // its (unchecked) toggle disagrees with.
+    // Markdown is the only split view (preview + source). Code files
+    // highlight inside their single editor pane, plain files show only
+    // the source pane and CSV files only the rendered table — nothing
+    // to toggle in any of those. With no document either (welcome), the
+    // toggle is hidden and Ctrl+U must not smuggle an unusable editor
+    // pane in. Drop the split class too, so a later file does not open
+    // with a source pane its (unchecked) toggle disagrees with.
     if (document.body.dataset.mode !== 'markdown' ||
         document.body.classList.contains('no-doc')) {
       toggle.checked = false;
@@ -802,6 +852,10 @@
   }
 
   sourceEl.addEventListener('scroll', () => {
+    // The code-mode overlay mirrors the textarea's scroll exactly (it
+    // cannot scroll itself: overflow hidden).
+    sourceHighlight.scrollTop = sourceEl.scrollTop;
+    sourceHighlight.scrollLeft = sourceEl.scrollLeft;
     if (Date.now() >= suppressEchoUntil.source) syncContentFromSource();
   }, { passive: true });
   contentWrap.addEventListener('scroll', () => {
@@ -813,6 +867,29 @@
   const setSaveEnabled = on => (saveBtn.disabled = !on);
   const hostSend = msg => { if (window.ipc) window.ipc.postMessage(msg); };
   saveBtn.onclick = () => hostSend('save');
+
+  // The code-mode highlight overlay behind the (transparent-text)
+  // textarea. With `null` it mirrors the plain buffer immediately —
+  // typed text stays visible while the colored render round-trips;
+  // with the host's colored block it swaps the colors in at identical
+  // metrics. The block's inner <code> is extracted: the overlay IS the
+  // pre, so the wrapper's own <pre> would double the metrics.
+  const sourceHighlight = document.getElementById('source-highlight');
+  function setCodeHighlight(html) {
+    if (html == null) {
+      sourceHighlight.textContent = sourceEl.value;
+    } else {
+      const scratch = document.createElement('div');
+      scratch.innerHTML = html;
+      const code = scratch.querySelector('code');
+      // innerHTML parsing drops ONE trailing newline — the textarea's
+      // phantom last line would lose its height, so put it back.
+      const tail = sourceEl.value.endsWith('\n') ? '\n' : '';
+      sourceHighlight.innerHTML = (code ? code.innerHTML : '') + tail;
+    }
+    sourceHighlight.scrollTop = sourceEl.scrollTop;
+    sourceHighlight.scrollLeft = sourceEl.scrollLeft;
+  }
 
   // Export HTML: the host renders the live buffer into a standalone
   // page next to the source (markdown documents only — the button is
@@ -837,6 +914,8 @@
   // pound.setRendered, which never touches this textarea).
   let editTimer = 0;
   sourceEl.addEventListener('input', () => {
+    // Keep the overlay honest while the debounced round-trip runs.
+    if (document.body.dataset.mode === 'code') setCodeHighlight(null);
     clearTimeout(editTimer);
     editTimer = setTimeout(() => hostSend('edit\n' + sourceEl.value), 250);
   });

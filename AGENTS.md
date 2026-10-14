@@ -12,8 +12,9 @@ render by default with the raw source side by side (Ctrl+U), and the
 source pane is a live editor: typing re-renders the preview and `Ctrl+S`
 saves back to disk. Beyond markdown, `.csv`/`.tsv` files render as a
 sortable, column-resizable table (no source pane — data, not prose),
-and any other text file opens straight into the editor (a text file is
-its own source). Architecture is strict MVP
+`.toml`/`.yaml` files open in a single editor pane with syntax colors
+painted behind the text, and any other text file opens straight into
+the editor (a text file is its own source). Architecture is strict MVP
 (Model–View–Presenter) — keep it that way:
 
 | Layer | File | Rule |
@@ -21,11 +22,12 @@ its own source). Architecture is strict MVP
 | Model | `src/model.rs` | state only, no UI types |
 | Rendering input | `src/markdown.rs` | pulldown-cmark → sanitized HTML, unit-tested headlessly |
 | Rendering input | `src/csv.rs` | delimited text → sanitized, sortable HTML table (delimiter sniffing, numeric-aware sort, 10k-row render cap), unit-tested headlessly |
+| Rendering input | `src/code.rs` | toml/yaml source → sanitized, syntax-highlighted HTML block (hand-rolled TOML tokenizer — syntect ships none; YAML via syntect), unit-tested headlessly |
 | Rendering input | `src/export.rs` | markdown source → standalone HTML export (self-contained page: embedded CSS, `poundimg://` srcs rewritten to relative paths), unit-tested headlessly |
 | Presenter | `src/presenter.rs` | intents/use-cases; owns the Model behind a **private field** — the view mutates only via intents (`open_externally`, `refuse_link`, `fail`, …) and reads only via accessors (`html()`, `is_dirty()`, `revision()`, …), never `model.*` directly; no GUI types |
 | JS bridge | `src/ipc.rs` | the shell→host wire protocol (`ipc::Message`, `parse`) + host→shell string encoding (`json_str`); headless-tested |
 | View | `src/view.rs` | WebView2 shell (tao + wry): window + event loop, ipc dispatch; embeds the shell document (`src/shell.html` via `include_str!`) |
-| Windows glue | `src/register.rs` | HKCU registry: app-list registration + `.md`/`.csv`/`.tsv` associations |
+| Windows glue | `src/register.rs` | HKCU registry: app-list registration + markdown/table/text associations (`ASSOCIATIONS` table) |
 
 ## Environment
 
@@ -59,12 +61,19 @@ its own source). Architecture is strict MVP
 - **`model::FileType` is the one source of truth** for rendering, pane
   layout and `type_label`: `Markdown` (`.md`/`.markdown`) renders the
   preview + editable source side by side; `Csv` (`.csv`/`.tsv`) renders
-  a table-only view; everything else is `Plain` and renders **nothing**
+  a table-only view; `Code` (`.toml`, `.yaml`/`.yml` — the payload is
+  the syntect token) renders a **single editor pane highlighted in
+  place** (`code.rs`; `data-mode="code"`): the source textarea's text
+  is transparent and an identically-metriced `#source-highlight` pre
+  behind it paints the host's colored spans — native caret/undo, one
+  pane, no Source toggle; typing mirrors the plain buffer into the
+  overlay immediately, then the debounced render round-trip repaints
+  the colors; everything else is `Plain` and renders **nothing**
   (`html` stays empty, edits never re-render) — the view shows the
   **editable source pane alone**, a text file being its own source: no
   second pane, no Source toggle, full editor right-click menu, inert
   scroll sync. The shell picks the layout from the mode string pushed
-  with the document (`body[data-mode="markdown|plain|csv"]` CSS;
+  with the document (`body[data-mode="markdown|plain|csv|code"]` CSS;
   `presenter::view_mode`).
 - **CSV files (`csv.rs`)**: the delimiter is sniffed from the first
   line (`,` `;` tab `|`, outside quotes), the first row is the header,
@@ -96,9 +105,10 @@ its own source). Architecture is strict MVP
   rows/columns (the file's true shape), never characters. Binary files
   (PDFs, .docx, ...) fail with an actionable message instead of Rust's
   UTF-8 error.
-- **Syntax highlighting** happens in `markdown.rs` at render time:
-  fenced blocks with a language syntect knows are highlighted into
-  classed spans (`<span class="storage type …">`, `highlight_codeblocks`
+- **Syntax highlighting** happens at render time through one dispatch,
+  `code::highlight`: fenced blocks with a language syntect knows are
+  highlighted into classed spans (`<span class="storage type …">`,
+  `highlight_codeblocks`
   + syntect's `ClassedHTMLGenerator`, `ClassStyle::Spaced`); the colors
   live in the shell CSS (`--syn-*` vars per palette) so no colors are
   baked into the HTML and every palette themes code. Unknown languages,

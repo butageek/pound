@@ -47,7 +47,9 @@ impl Document {
                 let grid = crate::csv::parse_grid(&source);
                 (source, Some(grid))
             }
-            FileType::Markdown | FileType::Plain => (decode_text(&bytes, &absolute)?, None),
+            FileType::Markdown | FileType::Code(_) | FileType::Plain => {
+                (decode_text(&bytes, &absolute)?, None)
+            }
         };
         let modified = fs::metadata(&absolute).and_then(|m| m.modified()).ok();
         let crlf = source.contains("\r\n");
@@ -59,6 +61,7 @@ impl Document {
                 markdown::to_html(&source, absolute.parent().unwrap_or(Path::new("."))),
                 None,
             ),
+            FileType::Code(language) => (crate::code::to_html(&source, language), None),
             FileType::Plain => (String::new(), None),
         };
         Ok(Document {
@@ -88,6 +91,7 @@ impl Document {
         match self.file_type {
             FileType::Markdown => "Markdown".to_owned(),
             FileType::Csv => "CSV".to_owned(),
+            FileType::Code(language) => language.to_uppercase(),
             FileType::Plain => {
                 let ext = self
                     .path
@@ -128,6 +132,10 @@ pub enum FileType {
     /// the rendered pane is the whole view (data, not prose: no source
     /// pane, nothing to edit).
     Csv,
+    /// A syntax-highlighted config file (`.toml`, `.yaml`/`.yml`): the
+    /// payload is the syntect language token. A single editor pane with
+    /// the highlight painted behind the text (the shell's overlay).
+    Code(&'static str),
     /// An editable source pane alone (a text file is its own source).
     Plain,
 }
@@ -141,6 +149,10 @@ impl FileType {
         match ext.as_deref() {
             Some("md" | "markdown") => FileType::Markdown,
             Some("csv" | "tsv") => FileType::Csv,
+            // The payload is the syntect token (also what `code.rs`
+            // renders); `yaml` serves both spellings.
+            Some("toml") => FileType::Code("toml"),
+            Some("yaml" | "yml") => FileType::Code("yaml"),
             _ => FileType::Plain,
         }
     }
@@ -226,6 +238,7 @@ impl Model {
             FileType::Markdown => {
                 markdown::to_html(&doc.source, doc.path.parent().unwrap_or(Path::new(".")))
             }
+            FileType::Code(language) => crate::code::to_html(&doc.source, language),
             _ => String::new(),
         };
         self.revision += 1;
@@ -431,6 +444,9 @@ mod tests {
         assert_eq!(f("NOTES.MARKDOWN"), FileType::Markdown); // case-insensitive
         assert_eq!(f("data.csv"), FileType::Csv);
         assert_eq!(f("data.TSV"), FileType::Csv);
+        assert_eq!(f("Cargo.toml"), FileType::Code("toml"));
+        assert_eq!(f("CONF.YAML"), FileType::Code("yaml")); // case-insensitive
+        assert_eq!(f("conf.yml"), FileType::Code("yaml"));
         assert_eq!(f("log.txt"), FileType::Plain);
         assert_eq!(f("Makefile"), FileType::Plain); // no extension
         assert_eq!(f("archive.tar.gz"), FileType::Plain);
@@ -695,6 +711,37 @@ new **body**",
         model.open(&csv);
         assert!(model.export_html().is_none());
         assert!(!dir.join("export-table.html").exists());
+    }
+
+    #[test]
+    fn code_files_render_highlighted_and_stay_editable() {
+        let dir = std::env::temp_dir().join(format!("pound-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(&path, "# note\n[server]\nport = 8080\n").unwrap();
+        let mut model = Model::default();
+        model.open(&path);
+
+        let doc = model.document.as_ref().unwrap();
+        assert_eq!(doc.file_type, FileType::Code("toml"));
+        assert_eq!(doc.type_label(), "TOML");
+        // Rendered into the editor's highlight overlay (single pane).
+        assert!(doc.html.contains("language-toml"), "{}", doc.html);
+        assert!(doc.html.contains(r#"<span class="comment"># note</span>"#));
+
+        // Edits re-render the highlight (the live round-trip).
+        model.edit("# other\n");
+        assert!(model.dirty);
+        assert!(model.document.as_ref().unwrap().html.contains("# other"));
+
+        // A yaml file rides the syntect path, same single-pane layout.
+        let yaml = dir.join("workflow.yaml");
+        fs::write(&yaml, "key: value\n").unwrap();
+        model.open(&yaml);
+        let doc = model.document.as_ref().unwrap();
+        assert_eq!(doc.file_type, FileType::Code("yaml"));
+        assert_eq!(doc.type_label(), "YAML");
+        assert!(doc.html.contains("language-yaml"), "{}", doc.html);
     }
 
     #[test]

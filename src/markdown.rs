@@ -98,7 +98,10 @@ where
                 let (mut events, code, language) = block.take().unwrap();
                 events.push((event, range));
                 let start = events[0].1.start;
-                match language.as_deref().and_then(|l| highlighted(&code, l)) {
+                match language
+                    .as_deref()
+                    .and_then(|l| crate::code::highlight(&code, l))
+                {
                     Some(html) => out.push((Event::Html(CowStr::from(html)), start..end)),
                     None => out.extend(events),
                 }
@@ -131,8 +134,9 @@ fn syntax_set() -> &'static SyntaxSet {
 
 /// Highlight `code` as `language` into classed spans; `None` when the
 /// language is unknown or syntect declines a line — callers then keep
-/// the plain rendering, never eating content.
-fn highlighted(code: &str, language: &str) -> Option<String> {
+/// the plain rendering, never eating content. Also used by the
+/// config-file view (`code.rs`).
+pub(crate) fn highlighted(code: &str, language: &str) -> Option<String> {
     let syntaxes = syntax_set();
     let syntax = syntaxes.find_syntax_by_token(language)?;
     let mut generator =
@@ -314,8 +318,9 @@ fn hex(byte: Option<&u8>) -> Option<u8> {
 
 /// Keep the markdown-oriented tags pulldown emits (including the task-list
 /// `<input type="checkbox">`), strip scripts, event handlers and styling
-/// from raw HTML embedded in the file.
-fn sanitize(raw: &str) -> String {
+/// from raw HTML embedded in the file. Also the sanitizer for the
+/// config-file view (`code.rs`).
+pub(crate) fn sanitize(raw: &str) -> String {
     let tags = [
         "a",
         "abbr",
@@ -546,6 +551,22 @@ mod highlighting {
         assert!(
             html.contains(">script<"),
             "script is inert span text: {html}"
+        );
+    }
+
+    #[test]
+    fn toml_fences_use_the_local_tokenizer() {
+        // syntect ships no TOML; the code.rs tokenizer serves fences too,
+        // so a ```toml example in a .md file matches an open .toml file.
+        let html = to_html("```toml\n[server]\nport = 1\n```\n", Path::new("/tmp"));
+        assert!(html.contains("language-toml"), "{html}");
+        assert!(
+            html.contains(r#"<span class="type">[server]</span>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<span class="constant">1</span>"#),
+            "{html}"
         );
     }
 

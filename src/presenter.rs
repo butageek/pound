@@ -251,6 +251,7 @@ impl Presenter {
     pub fn view_mode(&self) -> &'static str {
         match self.model.document.as_ref().map(|doc| doc.file_type) {
             Some(FileType::Csv) => "csv",
+            Some(FileType::Code(_)) => "code",
             Some(FileType::Plain) => "plain",
             Some(FileType::Markdown) | None => "markdown",
         }
@@ -563,6 +564,14 @@ mod tests {
         assert_eq!(presenter.html(), "");
         assert_eq!(presenter.source(), "just text");
         assert_eq!(presenter.view_mode(), "plain");
+
+        // Code files render highlighted, in the editor's overlay.
+        let toml = dir.join("view.toml");
+        std::fs::write(&toml, "key = 1\n").unwrap();
+        presenter.open_path(&toml);
+        assert_eq!(presenter.view_mode(), "code");
+        assert!(presenter.html().contains("language-toml"));
+        assert_eq!(presenter.source(), "key = 1\n");
     }
 
     #[test]

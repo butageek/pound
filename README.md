@@ -12,8 +12,9 @@
 
 **Pound** is a lightweight **file viewer for Windows** written in Rust.
 Drop a file, see it properly: markdown renders with a live-editable
-source pane beside it, `.csv`/`.tsv` become sortable tables, and any
-other text file opens straight into the editor.
+source pane beside it, `.csv`/`.tsv` become sortable tables, `.toml` /
+`.yaml` open in a syntax-highlighted editor, and any other text file
+opens straight into the editor.
 
 > Working MVP: Windows 10/11. Development happens on Linux/WSL; see
 > [AGENTS.md](AGENTS.md) for the environment, build and release playbook
@@ -102,6 +103,10 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
   for the common text types (`.txt`, `.log`, `.ini`, `.json` and
   friends) so it sits in their "Open with" lists — nothing is claimed
   as a default; you pick.
+- **TOML and YAML open in a highlighted editor** — one pane, colors in
+  place: the same editor as plain text (native caret, undo, Ctrl+S)
+  with syntax colors painted behind the text, updating as you type and
+  following your theme. (`.toml`, `.yaml`, `.yml`)
 - **Status bar**: full path of the open file plus its type — character
   and line counts for text, rows and columns for tables.
 - Full CommonMark via pulldown-cmark: tables, task lists, strikethrough,
@@ -124,6 +129,8 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
 | Model | `src/model.rs` | App state: open document (source, rendered HTML, CSV grid + sort), errors, unsaved/disk-conflict flags, reload revision. No UI types. |
 | Rendering input | `src/markdown.rs` | pulldown-cmark → HTML; rewrites local images to `poundimg://`; sanitizes with ammonia. Unit-tested headlessly. |
 | Rendering input | `src/csv.rs` | delimited text → sanitized, sortable HTML table; delimiter sniffing, numeric-aware sorts. Unit-tested headlessly. |
+| Rendering input | `src/code.rs` | toml/yaml source → sanitized, syntax-highlighted block (local TOML tokenizer; YAML via syntect). Unit-tested headlessly. |
+| Rendering input | `src/export.rs` | markdown source → standalone HTML export (self-contained page, relative image paths). Unit-tested headlessly. |
 | Presenter | `src/presenter.rs` | User intents: open/toggle, drag-and-drop routing, link opening. Owns the Model. |
 | JS bridge | `src/ipc.rs` | The shell↔host wire protocol (`ipc::Message`), headless-tested. |
 | View | `src/view.rs` | WebView2 shell (tao + wry): top bar, rendered pane, source pane, status bar. Displays the model, forwards intents. |
@@ -146,13 +153,17 @@ into HTML+CSS instead of being hand-laid-out by the GUI toolkit.
 - Double-click a file (once Pound is the handler), or run
   `pound file.md`, or drag a file onto the window.
 - Markdown renders immediately; `.csv`/`.tsv` open as a table — click a
-  header to sort, drag a header edge to resize that column — and any
-  other text file opens straight in the editor.
+  header to sort, drag a header edge to resize that column; `.toml` /
+  `.yaml` open highlighted in the editor; any other text file opens
+  straight in the editor.
 - Click **Source** (top right) or press `Ctrl+U` to toggle the side-by-side
   raw markdown panel. In split view, scrolling either pane scrolls the
   other to the matching position.
 - Edit the markdown in the source pane — the preview updates as you type;
   press `Ctrl+S` (or click **Save**) to write the file. `Tab` indents.
+- `Ctrl+E` (**Export HTML**) writes the open markdown file as a
+  self-contained web page next to it — the confirmation toast has an
+  **Open** button to view the result.
 - Code blocks have a **Copy** button; links open in your default browser.
 - Saving the file in another editor updates the view automatically.
 
@@ -160,11 +171,12 @@ into HTML+CSS instead of being hand-laid-out by the GUI toolkit.
 
 `pound register [--default]` writes **HKCU-only** keys (no admin):
 
-- `HKCU\Software\Classes\Pound.md` + `Pound.table` — ProgIds with
-  `shell\open\command` `"pound.exe" "%1"`, so the app appears in
-  *Open with* / *Default apps*.
-- `OpenWithProgids` entries for `.md`, `.csv` and `.tsv` (plus their
-  `Explorer\FileExts` counterparts).
+- `HKCU\Software\Classes\Pound.md`, `Pound.table` and `Pound.text` —
+  ProgIds with `shell\open\command` `"pound.exe" "%1"`, so the app
+  appears in *Open with* / *Default apps*.
+- `OpenWithProgids` entries for every extension in `register.rs`'s
+  `ASSOCIATIONS` table (markdown, tables, and the common text types;
+  plus their `Explorer\FileExts` counterparts).
 - `HKCU\Software\RegisteredApplications` + `Software\Pound\Capabilities`
   (name, description, the file associations) — this is what puts Pound in
   the **system app list** other apps enumerate.
@@ -235,11 +247,12 @@ by `tools/gen_icon.py` (stdlib only, deterministic):
 
 ## Roadmap
 
-Pound reads and edits what it opens today — markdown, CSV/TSV and plain
-text. Ideas for what's next:
+Pound reads and edits what it opens today — markdown, CSV/TSV,
+TOML/YAML and plain text. Ideas for what's next:
 
 - [ ] More file types beyond those (issues with your pet format welcome)
-- [ ] Syntax highlighting for the source pane
+- [x] Syntax highlighting in the source pane (TOML/YAML files, and
+      ```toml fences in markdown)
 - [ ] Table of contents sidebar; footnotes; remote images
 - [ ] winget manifest once the release has some real-world use
 
