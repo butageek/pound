@@ -390,7 +390,12 @@ Windows cross-check).
   verbatim paths on Windows but plain paths on Linux, so comparisons
   against raw `canonicalize()` output pass locally and fail on Windows
   CI. Compare with `model::strip_verbatim_prefix(...)` instead (this cost
-  the first v0.2.0 tag its release run).
+  the first v0.2.0 tag its release run). The same trap one layer over:
+  any path the app hands back derives from the document's
+  *canonicalized* path (long form), while `std::env::temp_dir()` can be
+  8.3 short (`RUNNER~1`) on Windows runners — never `assert_eq!` the
+  two; derive expectations from `model.document…path` (this variant
+  cost the v0.17.0 and v0.17.1 tags their first runs).
 - The GUI runs on Windows only; on Linux, non-Windows hosts print a notice.
   Verify the shell/rendering in any browser via the `dump_rendered_sample`
   recipe in Rendering notes.
