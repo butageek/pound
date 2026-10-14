@@ -8,9 +8,10 @@
 //!   `pound.setRendered(...)` etc., with every string encoded by
 //!   [`json_str`] (quoting only — ammonia handles untrusted content).
 //!
-//! `edit` payloads carry the whole editor buffer and `link` payloads a
-//! raw href, so those variants take the entire remainder of the message;
-//! everything else is a host-controlled word.
+//! `edit` payloads carry the whole editor buffer, `link` payloads a raw
+//! href, and `open-export` payloads the exported file's path, so those
+//! variants take the entire remainder of the message; everything else is
+//! a host-controlled word.
 
 /// One message posted by the shell over `window.ipc`.
 #[derive(Debug, PartialEq, Eq)]
@@ -24,6 +25,10 @@ pub enum Message {
     /// Ctrl+E / the Export HTML button: write the rendered document as a
     /// standalone HTML file next to its source (markdown documents only).
     ExportHtml,
+    /// The export toast's Open: launch the written file in the system
+    /// browser. The payload is the target path the host itself reported
+    /// in the toast push.
+    OpenExport { path: String },
     /// The close prompt's Save: save, then exit (via the updater when one
     /// is pending).
     SaveAndExit,
@@ -77,6 +82,11 @@ pub fn parse(body: &str) -> Option<Message> {
     if let Some(href) = body.strip_prefix("link\n") {
         return Some(Message::Link {
             href: href.to_owned(),
+        });
+    }
+    if let Some(path) = body.strip_prefix("open-export\n") {
+        return Some(Message::OpenExport {
+            path: path.to_owned(),
         });
     }
     if let Some(column) = body.strip_prefix("csv-sort\n") {
@@ -151,6 +161,7 @@ mod tests {
         assert_eq!(parse("edit"), None);
         assert_eq!(parse("setting"), None);
         assert_eq!(parse("link"), None);
+        assert_eq!(parse("open-export"), None);
     }
 
     #[test]
@@ -200,6 +211,24 @@ mod tests {
             parse("link\nfile:///C:/my%20docs/x.md"),
             Some(Message::Link {
                 href: "file:///C:/my%20docs/x.md".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn open_export_takes_the_whole_rest() {
+        assert_eq!(
+            parse("open-export\nC:/my docs/notes.html"),
+            Some(Message::OpenExport {
+                path: "C:/my docs/notes.html".to_owned(),
+            })
+        );
+        // Taken whole like edit/link: a payload containing
+        // message-shaped lines stays one payload.
+        assert_eq!(
+            parse("open-export\nC:/a\nsave"),
+            Some(Message::OpenExport {
+                path: "C:/a\nsave".to_owned(),
             })
         );
     }

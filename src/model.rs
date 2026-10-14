@@ -236,15 +236,15 @@ impl Model {
     /// Export the open markdown document as a standalone HTML file next
     /// to its source (`notes.md` → `notes.html`, overwriting an earlier
     /// export). Renders the live buffer, so unsaved edits ship too.
-    /// Non-markdown documents and missing documents are no-ops. Returns
-    /// whether a notice or error was recorded (the caller refreshes the
-    /// status line then).
-    pub fn export_html(&mut self) -> bool {
+    /// Returns the file written; `None` for non-markdown documents, with
+    /// no document open, or when the write failed (the error banner
+    /// carries the reason then).
+    pub fn export_html(&mut self) -> Option<PathBuf> {
         let Some(doc) = &self.document else {
-            return false;
+            return None;
         };
         if !matches!(doc.file_type, FileType::Markdown) {
-            return false;
+            return None;
         }
         let target = doc.path.with_extension("html");
         let page = crate::export::standalone_html(
@@ -259,11 +259,11 @@ impl Model {
                 self.notice = target
                     .file_name()
                     .map(|name| format!("exported to {}", name.to_string_lossy()));
-                true
+                Some(target)
             }
             Err(e) => {
                 self.error = Some(format!("cannot export {}: {e}", target.display()));
-                true
+                None
             }
         }
     }
@@ -625,8 +625,9 @@ new **body**",
         model.open(&path);
         let revision = model.revision;
 
-        assert!(model.export_html());
-        let target = path.with_extension("html");
+        // The export returns the file it wrote (the toast points there).
+        let target = model.export_html().unwrap();
+        assert_eq!(target, path.with_extension("html"));
         let page = fs::read_to_string(&target).unwrap();
         assert!(page.starts_with("<!doctype html>"));
         assert!(page.contains("<h1>Export me</h1>"));
@@ -641,7 +642,7 @@ new **body**",
         // the buffer) — and unsaved edits still ship in the next export.
         model.edit("# Export me twice\n");
         assert_eq!(model.notice, None);
-        assert!(model.export_html());
+        assert!(model.export_html().is_some());
         assert!(fs::read_to_string(&target).unwrap().contains("twice"));
     }
 
@@ -663,7 +664,7 @@ new **body**",
             }),
             ..Model::default()
         };
-        assert!(model.export_html());
+        assert!(model.export_html().is_none());
         assert_eq!(model.notice, None);
         assert!(model
             .error
@@ -682,10 +683,10 @@ new **body**",
         fs::write(&csv, "a\n1\n").unwrap();
         let mut model = Model::default();
         model.open(&txt);
-        assert!(!model.export_html());
+        assert!(model.export_html().is_none());
         assert_eq!(model.notice, None);
         model.open(&csv);
-        assert!(!model.export_html());
+        assert!(model.export_html().is_none());
         assert!(!dir.join("export-table.html").exists());
     }
 

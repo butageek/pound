@@ -193,10 +193,17 @@ its own source). Architecture is strict MVP
   paths *relative to the document's directory* (percent-encoded, `/`
   kept) so the export keeps its images wherever it moves — the
   renderer's own `markdown::percent_decode` powers the rewrite. Success
-  reports in the status bar (`exported to notes.html`) via
-  `Model::notice`, cleared by open/edit/save; failures take the usual
-  error banner. Plain/CSV documents hide the button
-  (`body[data-mode]` CSS, like Save/Source).
+  reports twice — a bottom-right toast (`pound.setExported`, like the
+  update toast) announcing the file with an **Open** button (ipc
+  `open-export\n<path>` — the host opens it through the same external
+  path as web links; auto-hides after 6s, and a new document retires
+  it), and the status bar (`exported to notes.html`) via
+  `Model::notice`, cleared by open/edit/save. The success push is
+  status-only (`push_status` → `pound.setStatus`) — re-sending the
+  HTML would re-parse the document and re-fire every poundimg request
+  for no visible change. Failures take the usual error banner.
+  Plain/CSV documents hide the button
+  (`body:not([data-mode="markdown"])` CSS, like Save/Source).
 - Disk-conflict policy: unsaved edits pause auto-reload. The status bar
   shows `edited`, plus `changed on disk` when the file was modified
   externally (saving resolves it, last writer wins); a same-content mtime

@@ -197,6 +197,22 @@
     overflow: hidden; text-overflow: ellipsis; vertical-align: middle;
   }
 
+  /* ---- export toast ---- */
+  /* Success confirmation for Export HTML (failures take the error
+     banner): one row like the update toast, retires itself via JS. */
+  #export-toast {
+    display: none; position: fixed; right: 12px; bottom: 38px; z-index: 25;
+    align-items: center; gap: 10px; padding: 10px 14px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.25); font-size: 13px; white-space: nowrap;
+  }
+  #export-toast button {
+    font: 13px "Segoe UI", system-ui, sans-serif; color: var(--text);
+    background: transparent; border: 1px solid var(--border); border-radius: 6px;
+    padding: 3px 10px; cursor: pointer;
+  }
+  #export-toast button:hover { background: var(--hover); }
+
   /* ---- error banner ---- */
   #error {
     display: none; align-items: center; gap: 10px;
@@ -474,6 +490,10 @@
       <span id="update-progress-line">Updating&#8230;</span>
     </div>
   </div>
+  <div id="export-toast">
+    <span>Exported to <b id="export-target"></b></span>
+    <button id="export-open" type="button">Open</button>
+  </div>
   <div id="close-prompt">
     <div class="dialog">
       <div class="dialog-title">Save changes?</div>
@@ -552,6 +572,7 @@
       document.getElementById('status-info').textContent = status;
       setSaveEnabled(edited);
       setExportEnabled(mode === 'markdown' && !!html);
+      hideExportToast(); // a toast about the previous file would mislead
       if (title) document.title = title;
       // A new document resets the layout state (a sort of the previous
       // table must not impose its column widths on this one), and the
@@ -633,6 +654,24 @@
       if (!text) return;
       sourceEl.focus();
       document.execCommand('insertText', false, text);
+    },
+    // The export's success toast: the host pushed the written file's
+    // path. Open hands it to the system browser; the toast retires
+    // itself after a few seconds (the status bar keeps the record).
+    setExported(path) {
+      exportedPath = path;
+      const name = path.split(/[\\/]/).filter(Boolean).pop() || path;
+      document.getElementById('export-target').textContent = name;
+      exportToast.title = path; // hover: where it landed
+      exportToast.style.display = 'flex';
+      clearTimeout(exportToastTimer);
+      exportToastTimer = setTimeout(hideExportToast, 6000);
+    },
+    // Status-bar-only refresh (see push_status in view.rs): updates the
+    // status line and save state without re-rendering either pane.
+    setStatus(status, edited) {
+      document.getElementById('status-info').textContent = status;
+      setSaveEnabled(edited);
     },
   };
 
@@ -767,6 +806,17 @@
   const exportBtn = document.getElementById('export');
   const setExportEnabled = on => (exportBtn.disabled = !on);
   exportBtn.onclick = () => hostSend('export-html');
+
+  // The success toast the host raises via pound.setExported. A new
+  // document retires it (it would point at the previous file).
+  const exportToast = document.getElementById('export-toast');
+  let exportToastTimer = 0;
+  let exportedPath = '';
+  const hideExportToast = () => (exportToast.style.display = 'none');
+  document.getElementById('export-open').onclick = () => {
+    hideExportToast();
+    hostSend('open-export\n' + exportedPath);
+  };
 
   // Typing: debounce, then hand the buffer to the host for re-rendering
   // (Rust owns rendering + sanitization; the result comes back through

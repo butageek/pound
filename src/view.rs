@@ -143,6 +143,9 @@ pub fn run(file: Option<PathBuf>) {
     // Clipboard text awaiting delivery to the shell (the Paste action:
     // the ipc handler cannot evaluate scripts, so the loop sends it).
     let clipboard_reply: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    // The export's success toast (same delivery pattern): the written
+    // file's display path, shown by `pound.setExported` below.
+    let export_toast: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
     // Background update check on start: a thread asks the GitHub API and
     // drops the latest tag here (None = no result); the event loop picks
@@ -190,6 +193,7 @@ pub fn run(file: Option<PathBuf>) {
     let ipc_update_ui = show_update_progress.clone();
     let ipc_installer = Arc::clone(&installer);
     let ipc_clipboard_reply = Arc::clone(&clipboard_reply);
+    let ipc_export_toast = Arc::clone(&export_toast);
     let ipc_theme_changed = theme_changed.clone();
     let ipc_ready_seen = ready_seen.clone();
     // Font list for validating settings-page saves (see fonts::families).
@@ -233,10 +237,22 @@ pub fn run(file: Option<PathBuf>) {
                 ipc_preview.set(true);
             }
             ipc::Message::ExportHtml => {
-                // Success lands in the status bar ("exported to …"),
-                // failure in the banner: either way a preview push
-                // delivers it — the document itself is untouched.
-                if ipc_presenter.borrow_mut().export_html() {
+                // Success: the toast announces the file (delivered in
+                // MainEventsCleared — ipc handlers cannot evaluate
+                // scripts); failure or no-op falls to the preview push,
+                // which shows the banner. The document is untouched.
+                match ipc_presenter.borrow_mut().export_html() {
+                    Some(target) => {
+                        *ipc_export_toast.lock().unwrap() = Some(target.display().to_string());
+                    }
+                    None => ipc_preview.set(true),
+                }
+            }
+            ipc::Message::OpenExport { path } => {
+                // The export toast's Open: hand the written file to the
+                // system browser (same path as web links; a miss — the
+                // file was deleted between export and click — banners).
+                if !ipc_presenter.borrow_mut().open_externally(&path) {
                     ipc_preview.set(true);
                 }
             }
@@ -491,6 +507,14 @@ pub fn run(file: Option<PathBuf>) {
                         format!("pound.setClipboardText({});", json_str(&text)),
                     );
                 }
+                // Deliver the export's success toast; the status line
+                // gets the durable "exported to …" notice without a
+                // full re-render (push_status leaves both panes alone —
+                // no re-parse, no image reloads).
+                if let Some(path) = export_toast.lock().unwrap().take() {
+                    eval_script(&webview, format!("pound.setExported({});", json_str(&path)));
+                    push_status(&webview, &shared.borrow());
+                }
                 // Update progress: switch the toast to progress mode once,
                 // then mirror the installer's latest line until it exits.
                 if show_update_progress.replace(false) {
@@ -681,6 +705,22 @@ fn push_rendered(webview: &WebView, presenter: &Presenter) {
         format!(
             "pound.setRendered({}, {}, {}); pound.setError({});",
             json_str(presenter.html()),
+            json_str(&presenter.status_text()),
+            presenter.is_dirty(),
+            json_str(presenter.error_text()),
+        ),
+    );
+}
+
+/// Push only the status bar, save state and error banner — neither pane
+/// is touched. For pushes that change no rendering (e.g. the export
+/// notice): re-sending the HTML would re-parse the document and re-fire
+/// every poundimg request for no visible change.
+fn push_status(webview: &WebView, presenter: &Presenter) {
+    eval_script(
+        webview,
+        format!(
+            "pound.setStatus({}, {}); pound.setError({});",
             json_str(&presenter.status_text()),
             presenter.is_dirty(),
             json_str(presenter.error_text()),

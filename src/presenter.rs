@@ -135,9 +135,10 @@ impl Presenter {
 
     /// Export the open markdown document as a standalone HTML file next
     /// to its source (`notes.md` → `notes.html`; see `Model::export_html`).
-    /// Returns whether a notice or error was recorded (the caller
-    /// re-pushes the status line then).
-    pub fn export_html(&mut self) -> bool {
+    /// Returns the file written — the caller shows the success toast for
+    /// it; `None` means no export happened (a failure banner, if any,
+    /// travels through the usual error push).
+    pub fn export_html(&mut self) -> Option<PathBuf> {
         self.model.export_html()
     }
 
@@ -166,9 +167,10 @@ impl Presenter {
         self.model.sort_csv(column)
     }
 
-    /// Open a web/mailto link in the system browser, recording a banner
-    /// error when the OS refuses it. Returns whether it opened (the
-    /// caller re-pushes the banner only on failure).
+    /// Open a web/mailto link — or the export toast's file — in the
+    /// system browser, recording a banner error when the OS refuses it.
+    /// Returns whether it opened (the caller re-pushes the banner only
+    /// on failure).
     pub fn open_externally(&mut self, url: &str) -> bool {
         match open::that(url) {
             Ok(()) => true,
@@ -602,8 +604,12 @@ mod tests {
 
         // No document, nothing to export; a markdown document reports
         // the written file until the next edit.
-        assert!(!Presenter::new(None).export_html());
-        assert!(presenter.export_html());
+        assert!(Presenter::new(None).export_html().is_none());
+        let target = presenter.export_html().unwrap();
+        assert_eq!(
+            target.file_name(),
+            Some(std::ffi::OsStr::new("exported.html"))
+        );
         assert!(presenter
             .status_text()
             .contains("exported to exported.html"));
