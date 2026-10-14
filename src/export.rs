@@ -226,10 +226,13 @@ mod tests {
             .join(format!("pound-test-{}", std::process::id()))
             .join(name);
         std::fs::create_dir_all(&dir).unwrap();
-        // Canonicalize like Document::load does: temp dirs can arrive in
-        // 8.3 short form on Windows, which would not prefix-match the
-        // images' canonicalized long-form paths (the same verbatim trap).
-        dir.canonicalize().unwrap()
+        // Canonicalize like Document::load does (then strip the
+        // `\\?\` verbatim prefix the same way — comparing a raw
+        // canonicalize against stripped forms is the documented
+        // Windows CI trap): temp dirs can arrive in 8.3 short form,
+        // which would not prefix-match the images' canonicalized
+        // long-form paths.
+        crate::model::strip_verbatim_prefix(dir.canonicalize().unwrap())
     }
 
     #[test]
