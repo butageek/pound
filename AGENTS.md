@@ -203,7 +203,10 @@ its own source). Architecture is strict MVP
   HTML would re-parse the document and re-fire every poundimg request
   for no visible change. Failures take the usual error banner.
   Plain/CSV documents hide the button
-  (`body:not([data-mode="markdown"])` CSS, like Save/Source).
+  (`body:not([data-mode="markdown"])` CSS, like Save/Source); with no
+  document at all (the welcome screen, `body.no-doc` — ships in the
+  markup so nothing flashes, dropped by `setContent` when a path
+  arrives) the whole Save/Export/Source group hides, and Ctrl+U no-ops.
 - Disk-conflict policy: unsaved edits pause auto-reload. The status bar
   shows `edited`, plus `changed on disk` when the file was modified
   externally (saving resolves it, last writer wins); a same-content mtime
@@ -353,15 +356,18 @@ Windows cross-check).
 
 ## Windows integration notes (context for `register.rs`)
 
-- Everything is HKCU-only: ProgIds `Pound.md` + `Pound.table`, and for
-  every openable extension (`.md`, `.csv`, `.tsv`) an `OpenWithProgids`
-  entry, an `Explorer\FileExts\<ext>\OpenWithProgids` entry,
+- Everything is HKCU-only: ProgIds `Pound.md`, `Pound.table` and
+  `Pound.text`, and for every extension in `register.rs`'s
+  `ASSOCIATIONS` table (markdown, data tables, and a curated
+  plain-text set — `.txt`, `.log`, `.ini` … `.toml`) an
+  `OpenWithProgids` entry, an `Explorer\FileExts\<ext>\OpenWithProgids`
+  entry,
   `RegisteredApplications` + `Software\Pound\Capabilities` (this is
   what puts us in the system app list and the per-extension "Open with"
   lists), then `SHChangeNotify`.
 - `--default` sets the per-user `.md` class default (only `.md`: a flag
-  that also claimed the data formats would decide a preference the user
-  never expressed). Explorer's `UserChoice`
+  that also claimed the data or text formats would decide a preference
+  the user never expressed). Explorer's `UserChoice`
   is hash-protected by Windows — no third-party app may set it silently;
   if the "choose an app" dialog still appears, the user picks Pound once
   with "Always". Platform restriction, not a bug.

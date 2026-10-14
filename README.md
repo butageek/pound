@@ -39,9 +39,10 @@ irm https://raw.githubusercontent.com/butageek/pound/main/tools/install.ps1 | ie
 
 This downloads the latest release build from GitHub, copies it to
 `%LOCALAPPDATA%\Pound`, adds a Start Menu shortcut and your user `PATH`,
-and registers Pound with Windows so `.md`, `.csv` and `.tsv` files can
-open with it. Then right-click any of those files → **Open with** →
-**Pound** (tick *Always*).
+and registers Pound with Windows so markdown, data and plain-text
+files (`.md`, `.csv`, `.tsv`, `.txt`, `.log`, `.ini`, `.json` and
+friends) can open with it. Then right-click any of those files →
+**Open with** → **Pound** (tick *Always*).
 
 **Upgrades use the exact same command** — it detects an existing install,
 closes a running Pound (gracefully, then forcefully), replaces the exe,
@@ -97,7 +98,10 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
   sink), and the header stays visible while you scroll. Huge exports
   render the first 10,000 rows with a note of the true count.
 - **Plain text just opens** — a text file is its own source: `.txt`,
-  `.log`, whatever, it opens straight into the editor.
+  `.log`, whatever, it opens straight into the editor. Pound registers
+  for the common text types (`.txt`, `.log`, `.ini`, `.json` and
+  friends) so it sits in their "Open with" lists — nothing is claimed
+  as a default; you pick.
 - **Status bar**: full path of the open file plus its type — character
   and line counts for text, rows and columns for tables.
 - Full CommonMark via pulldown-cmark: tables, task lists, strikethrough,

@@ -265,7 +265,7 @@ else {
     Write-Host 'Pound installed.' -ForegroundColor Green
 }
 if (-not $NoRegister -and -not $SetDefault) {
-    Write-Host 'Next: right-click a .md or .csv file > "Open with" > choose Pound (tick "Always").'
+    Write-Host 'Next: right-click a .md, .csv or text file > "Open with" > choose Pound (tick "Always").'
     Write-Host '      Or re-run the installer with -SetDefault.'
 }
 if ($NoPath) {

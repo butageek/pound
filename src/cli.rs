@@ -25,7 +25,8 @@ pub fn usage() -> String {
 USAGE:
     pound [FILE]              open FILE (or start empty)
     pound register [--default]
-                              register Pound as an app and associate .md files
+                              register Pound as an app and associate it with the
+                              files it opens (.md, .csv/.tsv, plain text)
                               --default also makes Pound the default .md handler
     pound unregister          remove all registry entries
     pound --help | --version

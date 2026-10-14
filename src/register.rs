@@ -8,7 +8,7 @@
 //! Keys created by `register`:
 //!
 //! ```text
-//! HKCU\Software\Classes\Pound.md / Pound.table        ProgIds
+//! HKCU\Software\Classes\Pound.md / Pound.table / Pound.text   ProgIds
 //!     \DefaultIcon                                    -> "pound.exe",0
 //!     \shell\open\command                             -> "pound.exe" "%1"
 //! HKCU\Software\Classes\<ext>\OpenWithProgids        -> the ProgId
@@ -29,27 +29,41 @@ use std::path::PathBuf;
 use winreg::enums::*;
 use winreg::RegKey;
 
-/// Every extension Pound opens, mapped to its ProgId. `Pound.md`
-/// predates the table views (installed users already carry it, and
-/// `--default` still keys off it); the data formats share one ProgId —
-/// Explorer shows the app name either way.
+/// Every extension Pound registers for, mapped to its ProgId (the
+/// ProgIds' own history lives below). Any text file *opens* (the
+/// editor pane is its own source); the plain-text group is the curated
+/// set we offer in Explorer's lists — common text kinds people open in
+/// a viewer, none claimed as a default (the user picks per type).
 const ASSOCIATIONS: &[(&str, &str)] = &[
     (".md", PROG_ID),
     (".csv", TABLE_PROG_ID),
     (".tsv", TABLE_PROG_ID),
+    (".txt", TEXT_PROG_ID),
+    (".log", TEXT_PROG_ID),
+    (".ini", TEXT_PROG_ID),
+    (".cfg", TEXT_PROG_ID),
+    (".conf", TEXT_PROG_ID),
+    (".json", TEXT_PROG_ID),
+    (".xml", TEXT_PROG_ID),
+    (".yaml", TEXT_PROG_ID),
+    (".yml", TEXT_PROG_ID),
+    (".toml", TEXT_PROG_ID),
 ];
 
 const PROG_ID: &str = "Pound.md";
 const TABLE_PROG_ID: &str = "Pound.table";
+const TEXT_PROG_ID: &str = "Pound.text";
 const APP_NAME: &str = "Pound";
-const APP_DESCRIPTION: &str = "Viewer for markdown and CSV files";
+const APP_DESCRIPTION: &str = "Viewer for markdown, CSV and text files";
 
 /// The ProgIds Pound writes, with their Explorer-facing descriptions.
 /// `Pound.md` predates the table views (installed users already carry
-/// it, and `--default` still keys off it); the data formats share one.
+/// it, and `--default` still keys off it); the data formats share one,
+/// and so does the plain-text set.
 const PROG_IDS: &[(&str, &str)] = &[
     (PROG_ID, "Pound Markdown Document"),
     (TABLE_PROG_ID, "Pound Data Table"),
+    (TEXT_PROG_ID, "Pound Text File"),
 ];
 
 fn exe_path() -> Result<PathBuf, String> {
@@ -287,7 +301,7 @@ pub fn register(set_default: bool) -> Result<(), String> {
         say("run:  start ms-settings:defaultapps");
     } else {
         say(&format!(
-            "{APP_NAME} registered in the app list for .md, .csv and .tsv files;"
+            "{APP_NAME} registered in the app list for markdown, data and text files;"
         ));
         say("use \"Open with > Choose another app\" to pick it for any of them.");
     }
@@ -347,4 +361,35 @@ pub fn unregister() -> Result<(), String> {
     notify_assoc_changed();
     say(&format!("{APP_NAME} unregistered."));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The association table is pure data the registry loops consume —
+    /// these invariants keep it well-formed (a duplicate extension
+    /// would silently overwrite its own entry; an unknown ProgId would
+    /// register an association nothing can open).
+    #[test]
+    fn associations_reference_known_prog_ids_without_duplicates() {
+        for (ext, prog_id) in ASSOCIATIONS {
+            assert!(
+                ext.starts_with('.') && ext.len() > 1,
+                "suspicious extension {ext}"
+            );
+            assert!(
+                PROG_IDS.iter().any(|(id, _)| id == prog_id),
+                "{ext} maps to unknown ProgId {prog_id}"
+            );
+        }
+        // Duplicates would silently overwrite their own entry.
+        let unique: std::collections::HashSet<_> =
+            ASSOCIATIONS.iter().map(|(ext, _)| *ext).collect();
+        assert_eq!(
+            unique.len(),
+            ASSOCIATIONS.len(),
+            "duplicate extensions in ASSOCIATIONS"
+        );
+    }
 }
