@@ -232,6 +232,14 @@ pub fn run(file: Option<PathBuf>) {
                 ipc_presenter.borrow_mut().save();
                 ipc_preview.set(true);
             }
+            ipc::Message::ExportHtml => {
+                // Success lands in the status bar ("exported to …"),
+                // failure in the banner: either way a preview push
+                // delivers it — the document itself is untouched.
+                if ipc_presenter.borrow_mut().export_html() {
+                    ipc_preview.set(true);
+                }
+            }
             ipc::Message::SaveAndExit => {
                 let open_path = ipc_presenter.borrow().document_path();
                 let mut presenter = ipc_presenter.borrow_mut();
@@ -261,12 +269,12 @@ pub fn run(file: Option<PathBuf>) {
             ipc::Message::Exit => {
                 // Same rule as SaveAndExit: discard-and-close exits
                 // unless an update is actually pending.
+                let open_path = ipc_presenter.borrow().document_path();
                 match plan_exit(
                     ClosePromptAnswer::Discard,
                     ipc_update_on_exit.replace(false),
                 ) {
                     ExitPlan::RunInstaller => {
-                        let open_path = ipc_presenter.borrow().document_path();
                         if !begin_update(open_path.as_deref()) {
                             ipc_exit.set(true);
                         }

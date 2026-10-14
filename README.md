@@ -84,6 +84,12 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
   rendered preview instantly (debounced), `Ctrl+S` or the **Save** button
   writes the file back to disk. The title bar and status bar mark
   unsaved edits, and edits are never clobbered by on-disk changes.
+- **Export HTML** — `Ctrl+E` or the **Export HTML** button writes the
+  document as a standalone web page (`notes.md` → `notes.html` right
+  next to it): the same rendering, sanitized and syntax-highlighted,
+  wrapped in a self-contained page with its own stylesheet (light and
+  dark, following the reader's system preference) and working relative
+  image links. Exports what you see — unsaved edits included.
 - **CSV/TSV tables** — the delimiter is detected per file (comma,
   semicolon, tab or pipe, so European Excel exports work out of the
   box). Columns open at content-fit widths and resize individually, a

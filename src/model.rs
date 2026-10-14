@@ -168,6 +168,9 @@ pub struct Model {
     pub document: Option<Document>,
     /// Last user-facing error, shown as a banner.
     pub error: Option<String>,
+    /// Last completed export's target (shown in the status bar until the
+    /// document changes — exports are otherwise silent).
+    pub notice: Option<String>,
     /// Bumped every time the document is (re)loaded or edited; lets the
     /// view invalidate caches such as loaded image textures.
     pub revision: u64,
@@ -184,6 +187,7 @@ impl Model {
             Ok(doc) => {
                 self.document = Some(doc);
                 self.error = None;
+                self.notice = None;
                 self.dirty = false;
                 self.stale = false;
                 self.revision += 1;
@@ -226,6 +230,42 @@ impl Model {
         };
         self.revision += 1;
         self.dirty = true;
+        self.notice = None;
+    }
+
+    /// Export the open markdown document as a standalone HTML file next
+    /// to its source (`notes.md` → `notes.html`, overwriting an earlier
+    /// export). Renders the live buffer, so unsaved edits ship too.
+    /// Non-markdown documents and missing documents are no-ops. Returns
+    /// whether a notice or error was recorded (the caller refreshes the
+    /// status line then).
+    pub fn export_html(&mut self) -> bool {
+        let Some(doc) = &self.document else {
+            return false;
+        };
+        if !matches!(doc.file_type, FileType::Markdown) {
+            return false;
+        }
+        let target = doc.path.with_extension("html");
+        let page = crate::export::standalone_html(
+            &doc.source,
+            doc.path.parent().unwrap_or(Path::new(".")),
+            &doc.name(),
+        );
+        match fs::write(&target, page) {
+            Ok(()) => {
+                // The target always has a file name (it derives from a
+                // loaded file's path); a miss would just skip the notice.
+                self.notice = target
+                    .file_name()
+                    .map(|name| format!("exported to {}", name.to_string_lossy()));
+                true
+            }
+            Err(e) => {
+                self.error = Some(format!("cannot export {}: {e}", target.display()));
+                true
+            }
+        }
     }
 
     /// Write unsaved edits back to disk, preserving the file's original
@@ -247,6 +287,7 @@ impl Model {
             Ok(modified) => {
                 self.dirty = false;
                 self.stale = false;
+                self.notice = None;
                 if let Some(doc) = self.document.as_mut() {
                     doc.modified = Some(modified);
                 }
@@ -570,6 +611,82 @@ new **body**",
         model.save();
         assert!(model.dirty, "failed save keeps the unsaved state");
         assert!(model.error.as_deref().unwrap_or("").contains("cannot save"));
+    }
+
+    #[test]
+    fn export_writes_standalone_html_next_to_the_source() {
+        let dir = std::env::temp_dir().join(format!("pound-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        // The image must exist for the renderer to localize it (and the
+        // export to hand back a relative src).
+        fs::write(dir.join("pic-export.png"), b"png").unwrap();
+        let path = temp_md("export.md", "# Export me\n\n![pic](pic-export.png)");
+        let mut model = Model::default();
+        model.open(&path);
+        let revision = model.revision;
+
+        assert!(model.export_html());
+        let target = path.with_extension("html");
+        let page = fs::read_to_string(&target).unwrap();
+        assert!(page.starts_with("<!doctype html>"));
+        assert!(page.contains("<h1>Export me</h1>"));
+        assert!(page.contains(r#"src="pic-export.png""#), "{page}");
+        assert_eq!(model.notice.as_deref(), Some("exported to export.html"));
+        assert_eq!(model.error, None);
+        // An export is not an edit: never dirty, no revision bump.
+        assert!(!model.dirty);
+        assert_eq!(model.revision, revision);
+
+        // Editing clears the stale notice (the export no longer matches
+        // the buffer) — and unsaved edits still ship in the next export.
+        model.edit("# Export me twice\n");
+        assert_eq!(model.notice, None);
+        assert!(model.export_html());
+        assert!(fs::read_to_string(&target).unwrap().contains("twice"));
+    }
+
+    #[test]
+    fn export_failure_sets_error_banner() {
+        // Struct-update syntax, not field reassignment after Default:
+        // keeps this test clean under clippy's -D warnings.
+        let mut model = Model {
+            document: Some(Document {
+                path: std::env::temp_dir().join("pound-no-such-dir/x.md"),
+                source: "# x".to_owned(),
+                html: String::new(),
+                modified: None,
+                crlf: false,
+                file_type: FileType::Markdown,
+                shape: None,
+                grid: None,
+                csv_sort: None,
+            }),
+            ..Model::default()
+        };
+        assert!(model.export_html());
+        assert_eq!(model.notice, None);
+        assert!(model
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("cannot export"));
+    }
+
+    #[test]
+    fn export_is_markdown_only() {
+        let dir = std::env::temp_dir().join(format!("pound-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let txt = dir.join("export-plain.txt");
+        fs::write(&txt, "just text").unwrap();
+        let csv = dir.join("export-table.csv");
+        fs::write(&csv, "a\n1\n").unwrap();
+        let mut model = Model::default();
+        model.open(&txt);
+        assert!(!model.export_html());
+        assert_eq!(model.notice, None);
+        model.open(&csv);
+        assert!(!model.export_html());
+        assert!(!dir.join("export-table.html").exists());
     }
 
     #[test]

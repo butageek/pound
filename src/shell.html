@@ -241,6 +241,9 @@
   body[data-mode="csv"] #source-wrap { display: none; }
   body[data-mode="csv"] #topbar .toggle,
   body[data-mode="csv"] #topbar #save { display: none; }
+  /* Export HTML renders markdown: every other mode hides it (the JS
+     also keeps it disabled with no document open). */
+  body:not([data-mode="markdown"]) #topbar #export { display: none; }
   /* Wide tables scroll sideways inside the rendered pane. */
   body[data-mode="csv"] #content-wrap { overflow-x: auto; }
   /* The source pane is a plain textarea: a real editor with native caret,
@@ -332,8 +335,8 @@
   }
   /* Markdown tables are block boxes that scroll in their own pane when
      wider than it. Scoped to markdown mode — each file type owns its
-     table rules — after max-width here clamped the CSV table's pinned
-     column sum and the engine rescaled every column (fixed in v0.16.1). */
+     table rules — so this max-width can never clamp another mode's
+     tables (it once rescaled every CSV column; fixed in v0.16.1). */
   body[data-mode="markdown"] #content table {
     border-collapse: collapse; display: block; max-width: 100%;
     overflow: auto; margin: 0 0 16px;
@@ -343,10 +346,9 @@
   body[data-mode="markdown"] #content th { background: var(--th-bg); font-weight: 600; }
 
   /* ---- CSV tables (the csv-mode view; the HTML comes from csv.rs) ----
-     Scoped to csv mode, symmetric with markdown's table rules above:
-     one file type, one rule set. Modes must not inherit each other's
-     table box models (that is how max-width once rescaled every CSV
-     column), and future file types start from a clean slate. */
+     Scoped to csv mode like the markdown rules above: one file type,
+     one rule set — modes never inherit each other's table box models,
+     and future file types start from a clean slate. */
   body[data-mode="csv"] #content table.csv {
     /* fixed layout: columns follow the <col> px widths the shell sets;
        the table width is pinned to their sum (see applyCsvWidths), so
@@ -431,6 +433,7 @@
   <div id="topbar">
     <button id="settings-open" type="button">Settings</button>
     <span class="spacer"></span>
+    <button id="export" type="button" disabled>Export HTML <kbd>Ctrl+E</kbd></button>
     <button id="save" type="button" disabled>Save <kbd>Ctrl+S</kbd></button>
     <label class="toggle">
       <input type="checkbox" id="source-toggle"> Source <kbd>Ctrl+U</kbd>
@@ -548,6 +551,7 @@
       statusPath.title = path; // hover tooltip: the untruncated path
       document.getElementById('status-info').textContent = status;
       setSaveEnabled(edited);
+      setExportEnabled(mode === 'markdown' && !!html);
       if (title) document.title = title;
       // A new document resets the layout state (a sort of the previous
       // table must not impose its column widths on this one), and the
@@ -576,6 +580,9 @@
       wrap.scrollLeft = scrollX; // a CSV sort must not jump sideways either
       document.getElementById('status-info').textContent = status;
       setSaveEnabled(edited);
+      // Typing can empty or fill the render: keep Export in step (the
+      // mode itself never changes here).
+      setExportEnabled(document.body.dataset.mode === 'markdown' && !!html);
       addCopyButtons();
     },
     setError(msg) {
@@ -754,6 +761,13 @@
   const hostSend = msg => { if (window.ipc) window.ipc.postMessage(msg); };
   saveBtn.onclick = () => hostSend('save');
 
+  // Export HTML: the host renders the live buffer into a standalone
+  // page next to the source (markdown documents only — the button is
+  // hidden in the other modes and disabled with no document open).
+  const exportBtn = document.getElementById('export');
+  const setExportEnabled = on => (exportBtn.disabled = !on);
+  exportBtn.onclick = () => hostSend('export-html');
+
   // Typing: debounce, then hand the buffer to the host for re-rendering
   // (Rust owns rendering + sanitization; the result comes back through
   // pound.setRendered, which never touches this textarea).
@@ -767,6 +781,13 @@
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
       e.preventDefault();
       if (!saveBtn.disabled) hostSend('save');
+    }
+  });
+
+  addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e') {
+      e.preventDefault();
+      if (!exportBtn.disabled) hostSend('export-html');
     }
   });
 

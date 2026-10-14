@@ -133,6 +133,14 @@ impl Presenter {
         self.model.save();
     }
 
+    /// Export the open markdown document as a standalone HTML file next
+    /// to its source (`notes.md` → `notes.html`; see `Model::export_html`).
+    /// Returns whether a notice or error was recorded (the caller
+    /// re-pushes the status line then).
+    pub fn export_html(&mut self) -> bool {
+        self.model.export_html()
+    }
+
     /// Called on a timer so external edits show up without a restart.
     pub fn reload_if_changed(&mut self) -> bool {
         self.model.reload_if_changed()
@@ -284,6 +292,11 @@ impl Presenter {
         }
         if self.model.stale {
             parts.push("changed on disk".to_owned());
+        }
+        // The last export's target rides along until the document
+        // changes (exports are otherwise silent).
+        if let Some(notice) = &self.model.notice {
+            parts.push(notice.clone());
         }
         parts.push(format!("v{}", env!("CARGO_PKG_VERSION")));
         parts.join(" · ")
@@ -577,6 +590,28 @@ mod tests {
         assert!(presenter.sort_csv(0));
         assert!(presenter.html().contains("sort-desc"));
         assert!(!presenter.is_dirty());
+    }
+
+    #[test]
+    fn export_html_reports_the_target_in_the_status_bar() {
+        let dir = std::env::temp_dir().join(format!("pound-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("exported.md");
+        std::fs::write(&path, "# hi").unwrap();
+        let mut presenter = Presenter::new(Some(&path));
+
+        // No document, nothing to export; a markdown document reports
+        // the written file until the next edit.
+        assert!(!Presenter::new(None).export_html());
+        assert!(presenter.export_html());
+        assert!(presenter
+            .status_text()
+            .contains("exported to exported.html"));
+        presenter.edit_source("# bye");
+        assert!(!presenter.status_text().contains("exported to"));
+        assert!(std::fs::read_to_string(path.with_extension("html"))
+            .unwrap()
+            .contains("<h1>hi</h1>"));
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! - [`model`]      : state (document, view mode, errors)
 //! - [`markdown`]   : rendering input (markdown source -> sanitized HTML)
 //! - [`csv`]        : rendering input (delimited text -> sortable table)
+//! - [`export`]     : export input (markdown source -> standalone HTML file)
 //! - [`presenter`]  : user intents / use-cases over the model
 //! - [`ipc`]        : the JS bridge (shell -> host messages, host -> shell
 //!   string encoding)
@@ -20,6 +21,8 @@ mod cli;
 mod clipboard;
 #[cfg(any(windows, test))]
 mod csv;
+#[cfg(any(windows, test))]
+mod export;
 #[cfg(any(windows, test))]
 mod fonts;
 #[cfg(any(windows, test))]

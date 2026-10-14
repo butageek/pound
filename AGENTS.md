@@ -21,6 +21,7 @@ its own source). Architecture is strict MVP
 | Model | `src/model.rs` | state only, no UI types |
 | Rendering input | `src/markdown.rs` | pulldown-cmark → sanitized HTML, unit-tested headlessly |
 | Rendering input | `src/csv.rs` | delimited text → sanitized, sortable HTML table (delimiter sniffing, numeric-aware sort, 10k-row render cap), unit-tested headlessly |
+| Rendering input | `src/export.rs` | markdown source → standalone HTML export (self-contained page: embedded CSS, `poundimg://` srcs rewritten to relative paths), unit-tested headlessly |
 | Presenter | `src/presenter.rs` | intents/use-cases; owns the Model behind a **private field** — the view mutates only via intents (`open_externally`, `refuse_link`, `fail`, …) and reads only via accessors (`html()`, `is_dirty()`, `revision()`, …), never `model.*` directly; no GUI types |
 | JS bridge | `src/ipc.rs` | the shell→host wire protocol (`ipc::Message`, `parse`) + host→shell string encoding (`json_str`); headless-tested |
 | View | `src/view.rs` | WebView2 shell (tao + wry): window + event loop, ipc dispatch; embeds the shell document (`src/shell.html` via `include_str!`) |
@@ -180,6 +181,22 @@ its own source). Architecture is strict MVP
   runs only for real document loads. `save` posts over the same channel;
   `model.save` preserves the file's CRLF/LF style (the DOM normalizes the
   buffer to LF).
+- **Export HTML** (markdown only): the top bar's Export button
+  (`Ctrl+E`) posts `export-html`; `Model::export_html` renders the
+  *live buffer* (unsaved edits included — an export is what you see)
+  through `export::standalone_html` and writes it next to the source
+  (`notes.md` → `notes.html`; re-export overwrites). The page is
+  self-contained: the same ammonia-sanitized, syntax-highlighted HTML
+  as the preview, an embedded stylesheet (Solarized Light / One Dark
+  switched by `prefers-color-scheme` — the app's palettes, no assets,
+  no scripts), and local `poundimg://` image srcs rewritten back to
+  paths *relative to the document's directory* (percent-encoded, `/`
+  kept) so the export keeps its images wherever it moves — the
+  renderer's own `markdown::percent_decode` powers the rewrite. Success
+  reports in the status bar (`exported to notes.html`) via
+  `Model::notice`, cleared by open/edit/save; failures take the usual
+  error banner. Plain/CSV documents hide the button
+  (`body[data-mode]` CSS, like Save/Source).
 - Disk-conflict policy: unsaved edits pause auto-reload. The status bar
   shows `edited`, plus `changed on disk` when the file was modified
   externally (saving resolves it, last writer wins); a same-content mtime
@@ -261,7 +278,9 @@ its own source). Architecture is strict MVP
   treat it as HTML. To preview/verify it in a browser: `cargo test
   dump_rendered_sample -- --ignored`, then compose `/tmp/pound-preview.html`
   from the shell file + the dumped content (see git history for the recipe)
-  and open it with agent-browser.
+  and open it with agent-browser. Exported pages can be checked directly:
+  `cargo test dump_exported_sample -- --ignored` writes
+  `/tmp/pound-export-sample.html`.
 
 
 ## Commands

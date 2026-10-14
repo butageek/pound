@@ -21,6 +21,9 @@ pub enum Message {
     Ready,
     /// Ctrl+S / the Save button.
     Save,
+    /// Ctrl+E / the Export HTML button: write the rendered document as a
+    /// standalone HTML file next to its source (markdown documents only).
+    ExportHtml,
     /// The close prompt's Save: save, then exit (via the updater when one
     /// is pending).
     SaveAndExit,
@@ -87,6 +90,7 @@ pub fn parse(body: &str) -> Option<Message> {
     match body {
         "ready" => Some(Message::Ready),
         "save" => Some(Message::Save),
+        "export-html" => Some(Message::ExportHtml),
         "save-and-exit" => Some(Message::SaveAndExit),
         "exit" => Some(Message::Exit),
         "update" => Some(Message::Update),
@@ -126,6 +130,7 @@ mod tests {
     fn host_words_parse() {
         assert_eq!(parse("ready"), Some(Message::Ready));
         assert_eq!(parse("save"), Some(Message::Save));
+        assert_eq!(parse("export-html"), Some(Message::ExportHtml));
         assert_eq!(parse("save-and-exit"), Some(Message::SaveAndExit));
         assert_eq!(parse("exit"), Some(Message::Exit));
         assert_eq!(parse("update"), Some(Message::Update));

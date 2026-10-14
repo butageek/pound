@@ -202,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn plain_closes_save_or_discard_and_just_exit() {
+    fn plain_closes_exit_without_the_installer() {
         assert_eq!(plan_exit(ClosePromptAnswer::Discard, false), ExitPlan::Exit);
         assert_eq!(
             plan_exit(ClosePromptAnswer::Save { saved: true }, false),
