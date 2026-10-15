@@ -134,7 +134,9 @@ pub fn parse_font_size(value: &str) -> Option<f32> {
 }
 
 /// All persisted appearance settings, injected into the shell before
-/// first paint (see `shell_html` in the view).
+/// first paint (see `shell_html` in the view; the palette/font fields
+/// are read there — Windows-only, hence the relaxed lint off-Windows).
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Debug)]
 pub struct Settings {
     pub theme: Theme,

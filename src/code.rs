@@ -236,26 +236,40 @@ fn read_string(chars: &[char], from: usize) -> (&[char], usize) {
     }
 }
 
-/// Append a classed span with its text HTML-escaped.
+/// Append a classed span with its text HTML-escaped (single pass over
+/// the chars — no intermediate `String`, no `replace` chains).
 fn push_span(out: &mut String, class: &str, text: &[char]) {
     out.push_str("<span class=\"");
     out.push_str(class);
     out.push_str("\">");
-    out.push_str(&escape_html(&text.iter().collect::<String>()));
+    escape_into(out, text.iter().copied());
     out.push_str("</span>");
 }
 
 /// Flush buffered plain text (escaped) into the output.
 fn flush_plain(out: &mut String, plain: &mut String) {
-    out.push_str(&escape_html(plain));
-    plain.clear();
+    escape_into(out, plain.drain(..));
 }
 
 fn escape_html(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+    let mut out = String::with_capacity(text.len());
+    escape_into(&mut out, text.chars());
+    out
+}
+
+/// Append `chars` HTML-escaped — one pass, no intermediate strings (the
+/// old `escape_html` ran four `.replace()` passes per span, which the
+/// code-mode editor pays on every debounced keystroke).
+fn escape_into(out: &mut String, chars: impl Iterator<Item = char>) {
+    for c in chars {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            c => out.push(c),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -64,14 +64,12 @@ pub fn families() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     // The stub is what non-Windows hosts see; on Windows the real
     // enumeration returns the machine's fonts (and needs a desktop
     // session), so this only runs off-Windows.
     #[cfg(not(windows))]
     #[test]
     fn non_windows_list_is_empty() {
-        assert!(families().is_empty());
+        assert!(super::families().is_empty());
     }
 }

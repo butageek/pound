@@ -6,6 +6,19 @@ use std::time::SystemTime;
 
 use crate::markdown;
 
+/// Render `source` per file type — the one dispatch shared by loads,
+/// edits and the view's background worker, so every path renders
+/// identically. Tables render from the parsed grid instead (their
+/// renderer input is `grid_to_html`, not the raw text); plain files
+/// render nothing (the source pane is the view).
+pub(crate) fn render_source(source: &str, file_type: FileType, base_dir: &Path) -> String {
+    match file_type {
+        FileType::Markdown => markdown::to_html(source, base_dir),
+        FileType::Code(language) => crate::code::to_html(source, language),
+        FileType::Csv | FileType::Plain => String::new(),
+    }
+}
+
 /// A loaded markdown document: source text plus its rendered HTML.
 pub struct Document {
     pub path: PathBuf,
@@ -39,29 +52,29 @@ impl Document {
         let bytes =
             fs::read(&absolute).map_err(|e| format!("cannot read {}: {e}", absolute.display()))?;
         let file_type = FileType::from_path(&absolute);
+        let base_dir = absolute.parent().unwrap_or(Path::new(".")).to_path_buf();
         let (source, grid) = match file_type {
             // CSV parses into a grid at load; re-sorting re-renders from
             // the grid without touching the file again.
             FileType::Csv => {
-                let source = decode_text(&bytes, &absolute)?;
+                let source = decode_text(bytes, &absolute)?;
                 let grid = crate::csv::parse_grid(&source);
                 (source, Some(grid))
             }
             FileType::Markdown | FileType::Code(_) | FileType::Plain => {
-                (decode_text(&bytes, &absolute)?, None)
+                (decode_text(bytes, &absolute)?, None)
             }
         };
         let modified = fs::metadata(&absolute).and_then(|m| m.modified()).ok();
         let crlf = source.contains("\r\n");
+        // Tables render from the grid (plus their true shape); prose and
+        // code render through the one shared dispatch; plain renders
+        // nothing (the source pane is the view).
         let (html, shape) = match file_type {
-            // Table documents always carry the grid parsed above;
-            // markdown renders text and plain files render nothing.
             FileType::Csv => crate::csv::grid_to_html(grid.as_deref().unwrap_or(&[]), None),
-            FileType::Markdown => (
-                markdown::to_html(&source, absolute.parent().unwrap_or(Path::new("."))),
-                None,
-            ),
-            FileType::Code(language) => (crate::code::to_html(&source, language), None),
+            FileType::Markdown | FileType::Code(_) => {
+                (render_source(&source, file_type, &base_dir), None)
+            }
             FileType::Plain => (String::new(), None),
         };
         Ok(Document {
@@ -109,11 +122,11 @@ impl Document {
     }
 }
 
-/// Decode file bytes as UTF-8 text. Binary files (PDFs, .docx, images…)
-/// get a message that says what to do instead of Rust's "stream did not
-/// contain valid UTF-8".
-fn decode_text(bytes: &[u8], path: &Path) -> Result<String, String> {
-    String::from_utf8(bytes.to_vec()).map_err(|_| {
+/// Decode file bytes as UTF-8 text (consuming them — no full-file
+/// copy). Binary files (PDFs, .docx, images…) get a message that says
+/// what to do instead of Rust's "stream did not contain valid UTF-8".
+fn decode_text(bytes: Vec<u8>, path: &Path) -> Result<String, String> {
+    String::from_utf8(bytes).map_err(|_| {
         format!(
             "cannot open {}: not a text file (Pound reads markdown and CSV)",
             path.display()
@@ -195,7 +208,15 @@ pub struct Model {
 
 impl Model {
     pub fn open(&mut self, path: &Path) {
-        match Document::load(path) {
+        self.adopt(Document::load(path));
+    }
+
+    /// Take a (possibly background-loaded) document into state — the
+    /// second half of [`Model::open`], split so the view can load and
+    /// render files off the UI thread. Errors keep any current document
+    /// and raise the banner, exactly like a synchronous open.
+    pub fn adopt(&mut self, result: Result<Document, String>) {
+        match result {
             Ok(doc) => {
                 self.document = Some(doc);
                 self.error = None;
@@ -208,42 +229,63 @@ impl Model {
         }
     }
 
-    pub fn reload(&mut self) {
-        if let Some(doc) = &self.document {
-            let path = doc.path.clone();
-            self.open(&path);
-        }
-    }
-
     pub fn dismiss_error(&mut self) {
         self.error = None;
     }
 
     /// Apply an edit from the source pane: replace the buffer, re-render
     /// the preview and remember that it is unsaved. Identical text is a
-    /// no-op (no spurious re-render or revision bump).
+    /// no-op (no spurious re-render or revision bump). The synchronous
+    /// path (tests, headless callers); the GUI splits this into
+    /// [`Model::edit_buffer`] + [`Model::apply_render`] so the render
+    /// runs on a background thread.
     pub fn edit(&mut self, text: &str) {
-        let Some(doc) = self.document.as_mut() else {
-            return;
-        };
-        if doc.source == text {
+        if !self.edit_buffer(text) {
             return;
         }
-        doc.source = text.to_owned();
-        // Plain files render nothing (the source pane is the view), so
-        // this is safe for every editable kind. CSV documents are
-        // read-only: the shell posts no edits for them — there is no
-        // source pane to type in — so their grid never goes stale.
-        doc.html = match doc.file_type {
-            FileType::Markdown => {
-                markdown::to_html(&doc.source, doc.path.parent().unwrap_or(Path::new(".")))
-            }
-            FileType::Code(language) => crate::code::to_html(&doc.source, language),
-            _ => String::new(),
-        };
+        if let Some(doc) = self.document.as_mut() {
+            // CSV documents are read-only (no source pane to type in),
+            // so an editable document's grid can never go stale here.
+            doc.html = render_source(
+                &doc.source,
+                doc.file_type,
+                doc.path.parent().unwrap_or(Path::new(".")),
+            );
+        }
         self.revision += 1;
+    }
+
+    /// Store a new editor buffer without re-rendering: the view marks
+    /// the document edited immediately (title, status bar, save works on
+    /// the newest text) and delivers the rendered html via
+    /// [`Model::apply_render`] when the background render finishes.
+    /// Returns whether the buffer changed.
+    pub fn edit_buffer(&mut self, text: &str) -> bool {
+        let Some(doc) = self.document.as_mut() else {
+            return false;
+        };
+        if doc.source == text {
+            return false;
+        }
+        doc.source = text.to_owned();
         self.dirty = true;
         self.notice = None;
+        true
+    }
+
+    /// Deliver a background render of the current buffer. The revision
+    /// (and with it the view's re-push) moves only when the html actually
+    /// changed — a render that produced identical output is a no-op.
+    pub fn apply_render(&mut self, html: String) -> bool {
+        let Some(doc) = self.document.as_mut() else {
+            return false;
+        };
+        if doc.html == html {
+            return false;
+        }
+        doc.html = html;
+        self.revision += 1;
+        true
     }
 
     /// Export the open markdown document as a standalone HTML file next
@@ -311,8 +353,26 @@ impl Model {
 
     /// Reload the document if its modification time changed on disk and
     /// there is nothing unsaved to protect. Returns `true` when the
-    /// document was reloaded.
+    /// document was reloaded. Synchronous path (tests); the GUI polls
+    /// with [`Model::poll_disk_changed`] and adopts the background
+    /// load's result via [`Model::adopt_reload`].
     pub fn reload_if_changed(&mut self) -> bool {
+        if !self.poll_disk_changed() {
+            return false;
+        }
+        if let Some(doc) = &self.document {
+            let path = doc.path.clone();
+            self.adopt_reload(Document::load(&path))
+        } else {
+            false
+        }
+    }
+
+    /// The cheap half of the disk-change poll: an mtime check only, no
+    /// file read (the view loads the file on a background thread when
+    /// this returns `true`). Unsaved edits still win over the disk:
+    /// the reload is paused and the conflict surfaces as `stale`.
+    pub fn poll_disk_changed(&mut self) -> bool {
         let Some(doc) = &self.document else {
             return false;
         };
@@ -325,22 +385,42 @@ impl Model {
         if doc.modified == Some(modified) {
             return false;
         }
-        // Unsaved edits always win over the disk: pause auto-reload and
-        // surface the conflict in the status bar instead of clobbering.
         if self.dirty {
             self.stale = true;
             return false;
         }
-        // An mtime touch with identical content (e.g. a save from another
-        // Pound window) must not reset the view for no visible reason.
-        if fs::read(&doc.path).is_ok_and(|disk| String::from_utf8_lossy(&disk) == doc.source) {
-            if let Some(doc) = self.document.as_mut() {
-                doc.modified = Some(modified);
-            }
-            return false;
-        }
-        self.reload();
         true
+    }
+
+    /// Take a background reload's result. Identical content (an mtime
+    /// touch, e.g. a save from another Pound window) only refreshes the
+    /// recorded mtime — no reload, no re-render; different content swaps
+    /// the document like an open. If edits arrived while the load was in
+    /// flight, they win: the conflict is surfaced as `stale` instead of
+    /// clobbering the buffer. Returns whether the document changed.
+    pub fn adopt_reload(&mut self, result: Result<Document, String>) -> bool {
+        match result {
+            Ok(doc) => {
+                if self.dirty {
+                    // The user typed while the reload was rendering.
+                    self.stale = true;
+                    return false;
+                }
+                if let Some(current) = self.document.as_mut() {
+                    if current.source == doc.source {
+                        // Same bytes touched: refresh the mtime, keep the view.
+                        current.modified = doc.modified;
+                        return false;
+                    }
+                }
+                self.adopt(Ok(doc));
+                true
+            }
+            Err(e) => {
+                self.error = Some(e);
+                false
+            }
+        }
     }
 
     /// Re-render the CSV table under a new sort (a header click): the
@@ -611,19 +691,21 @@ new **body**",
 
     #[test]
     fn save_failure_sets_error_banner() {
-        let mut model = Model::default();
-        model.document = Some(Document {
-            path: std::env::temp_dir().join("pound-no-such-dir/x.md"),
-            source: "# x".to_owned(),
-            html: String::new(),
-            modified: None,
-            crlf: false,
-            file_type: FileType::Markdown,
-            shape: None,
-            grid: None,
-            csv_sort: None,
-        });
-        model.dirty = true;
+        let mut model = Model {
+            document: Some(Document {
+                path: std::env::temp_dir().join("pound-no-such-dir/x.md"),
+                source: "# x".to_owned(),
+                html: String::new(),
+                modified: None,
+                crlf: false,
+                file_type: FileType::Markdown,
+                shape: None,
+                grid: None,
+                csv_sort: None,
+            }),
+            dirty: true,
+            ..Model::default()
+        };
         model.save();
         assert!(model.dirty, "failed save keeps the unsaved state");
         assert!(model.error.as_deref().unwrap_or("").contains("cannot save"));
@@ -812,5 +894,102 @@ new **body**",
         let doc = model.document.as_ref().unwrap();
         assert!(doc.html.contains("<h1>v2</h1>"));
         assert_eq!(model.revision, 2);
+    }
+
+    #[test]
+    fn async_edit_split_matches_the_synchronous_path() {
+        // The GUI's flow: buffer first (dirty immediately, save-safe),
+        // rendered html later (revision moves only when it changed).
+        let path = temp_md("split.md", "# v1");
+        let mut model = Model::default();
+        model.open(&path);
+        let base = model.revision;
+
+        // Identical buffer: no state change, nothing to render.
+        assert!(!model.edit_buffer("# v1"));
+
+        assert!(model.edit_buffer("# v2 **new**"));
+        assert!(model.dirty, "dirty before the render lands (save-safe)");
+        assert_eq!(model.revision, base, "no revision bump until html lands");
+        // The save writes the newest buffer even mid-round-trip.
+        model.save();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# v2 **new**");
+
+        // A render that changes nothing is a no-op push.
+        assert!(!model.apply_render(model.document.as_ref().unwrap().html.clone()));
+        assert_eq!(model.revision, base);
+        // The real render moves it.
+        let html = render_source(
+            model.document.as_ref().unwrap().source.as_str(),
+            FileType::Markdown,
+            path.parent().unwrap(),
+        );
+        assert!(model.apply_render(html));
+        assert_eq!(model.revision, base + 1);
+        let rendered = &model.document.as_ref().unwrap().html;
+        assert!(rendered.contains("<h1>v2"), "{rendered}");
+        assert!(rendered.contains("<strong>new</strong>"), "{rendered}");
+    }
+
+    #[test]
+    fn adopt_is_the_second_half_of_open() {
+        let path = temp_md("adopt.md", "# hi");
+        let mut async_model = Model::default();
+        async_model.adopt(Document::load(&path));
+        let mut sync_model = Model::default();
+        sync_model.open(&path);
+        assert_eq!(async_model.revision, sync_model.revision);
+        assert_eq!(
+            async_model.document.as_ref().unwrap().html,
+            sync_model.document.as_ref().unwrap().html
+        );
+        // An error keeps the current document and raises the banner.
+        async_model.adopt(Err("boom".to_owned()));
+        assert!(async_model.document.is_some());
+        assert_eq!(async_model.error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn adopt_reload_never_clobbers_in_flight_edits() {
+        let path = temp_md("race.md", "# disk");
+        let mut model = Model::default();
+        model.open(&path);
+
+        // The disk changes while the load is in flight, and the user
+        // types before the result lands: the edits win, the conflict
+        // surfaces as `stale` instead of a clobber.
+        let loaded = {
+            fs::write(&path, "# disk v2").unwrap();
+            Document::load(&path)
+        };
+        model.edit_buffer("# my edits");
+        assert!(!model.adopt_reload(loaded));
+        assert!(model.stale);
+        assert!(model.document.as_ref().unwrap().source.contains("my edits"));
+
+        // Clean buffer (saved): new content swaps in.
+        model.save();
+        let fresh = {
+            fs::write(&path, "# disk v3").unwrap();
+            Document::load(&path)
+        };
+        assert!(model.adopt_reload(fresh));
+        assert!(model.document.as_ref().unwrap().source.contains("v3"));
+        assert!(!model.dirty);
+    }
+
+    #[test]
+    fn adopt_reload_with_identical_content_is_quiet() {
+        let path = temp_md("touch-async.md", "# v1");
+        let mut model = Model::default();
+        model.open(&path);
+        let revision = model.revision;
+        bump_mtime(&path);
+        assert!(model.poll_disk_changed());
+        // Same bytes: the reload lands but nothing changes (and load
+        // recorded the fresh mtime, so the poll stops asking).
+        assert!(!model.adopt_reload(Document::load(&path)));
+        assert_eq!(model.revision, revision);
+        assert!(!model.poll_disk_changed());
     }
 }

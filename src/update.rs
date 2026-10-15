@@ -123,7 +123,9 @@ fn installer_script(open_path: Option<&Path>) -> String {
     )
 }
 
-/// Live state of a running installer, streamed to the shell's toast.
+/// Live state of a running installer, streamed to the shell's toast
+/// (owned by the Windows view's event loop).
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Default)]
 pub struct InstallerRun {
     /// The installer's own progress lines (Write-Step output).
@@ -132,6 +134,9 @@ pub struct InstallerRun {
     pub success: bool,
 }
 
+/// Where the view keeps the running [`InstallerRun`], if any (the
+/// worker thread fills it; the event loop drains it for the toast).
+#[cfg_attr(not(windows), allow(dead_code))]
 pub type InstallerSlot = Mutex<Option<InstallerRun>>;
 
 /// Spawn the official installer with piped output so the caller can show

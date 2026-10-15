@@ -19,14 +19,14 @@ the editor (a text file is its own source). Architecture is strict MVP
 
 | Layer | File | Rule |
 |---|---|---|
-| Model | `src/model.rs` | state only, no UI types |
+| Model | `src/model.rs` | state only, no UI types; hosts `render_source`, the one render dispatch loads/edits/the worker share |
 | Rendering input | `src/markdown.rs` | pulldown-cmark → sanitized HTML, unit-tested headlessly |
 | Rendering input | `src/csv.rs` | delimited text → sanitized, sortable HTML table (delimiter sniffing, numeric-aware sort, 10k-row render cap), unit-tested headlessly |
 | Rendering input | `src/code.rs` | toml/yaml source → sanitized, syntax-highlighted HTML block (hand-rolled TOML tokenizer — syntect ships none; YAML via syntect), unit-tested headlessly |
 | Rendering input | `src/export.rs` | markdown source → standalone HTML export (self-contained page: embedded CSS, `poundimg://` srcs rewritten to relative paths), unit-tested headlessly |
 | Presenter | `src/presenter.rs` | intents/use-cases; owns the Model behind a **private field** — the view mutates only via intents (`open_externally`, `refuse_link`, `fail`, …) and reads only via accessors (`html()`, `is_dirty()`, `revision()`, …), never `model.*` directly; no GUI types |
 | JS bridge | `src/ipc.rs` | the shell→host wire protocol (`ipc::Message`, `parse`) + host→shell string encoding (`json_str`); headless-tested |
-| View | `src/view.rs` | WebView2 shell (tao + wry): window + event loop, ipc dispatch; embeds the shell document (`src/shell.html` via `include_str!`) |
+| View | `src/view.rs` | WebView2 shell (tao + wry): window + event loop, ipc dispatch, background render worker (loads + debounced re-renders off the UI thread); embeds the shell document (`src/shell.html` via `include_str!`) |
 | Windows glue | `src/register.rs` | HKCU registry: app-list registration + markdown/table/text associations (`ASSOCIATIONS` table) |
 
 ## Environment
@@ -117,6 +117,32 @@ the editor (a text file is its own source). Architecture is strict MVP
   `class`). The fence info string's first token is the language
   (```rust,ignore → rust). syntect is built with `regex-fancy` (pure
   Rust, no oniguruma) and without the default themes dump.
+- **Rendering happens on a background worker** (`view.rs`: a job
+  channel + tao user events; `model::render_source` is the one render
+  dispatch). Opening a file (startup arg, drag-drop, a link's new
+  window), the on-disk auto-reload, and every debounced edit re-render
+  all run off the UI thread — a multi-hundred-ms syntect/ammonia render
+  must never freeze the window or the caret. The UI thread keeps the
+  state halves: `Model::edit_buffer` stores the buffer and marks it
+  dirty immediately (so title/status/save act on the newest text),
+  `Model::apply_render` takes the html when the worker answers (a
+  generation counter bumps on every open; results from an older
+  generation are dropped, so a slow load can never replace a newer
+  document or clobber edits — `Model::adopt_reload` refuses to apply
+  over a buffer that changed while it was in flight). Startup builds
+  the window + webview first and loads the file in the background:
+  `body.loading` (injected by `shell_html`, dropped by the first
+  `pound.setContent`) hides the welcome screen and the provisional
+  window title names the file while it loads. The worker also warms
+  syntect's `SyntaxSet` at spawn (~40ms once per process, paid by
+  nobody).
+- **Pushes are tiered** — `setContent` (whole document, rewrites the
+  textarea) only for real document loads; `setRendered` (rendered pane
+  + status) for edit renders and CSV sorts; `setStatus` (status bar +
+  banner only) for banner-only changes (dismissed error, save ack,
+  refused link, failed updater spawn) — a full `setContent` would
+  re-send megabytes of html and rewrite the textarea, which once parked
+  the caret when an error banner was dismissed mid-edit.
 - Rust → JS: `push_document` evaluates `pound.setContent(html, source,
   title, path, status)` + `pound.setError(msg)` — strings JSON-escaped by
   `json_str` (quoting only; XSS is handled by ammonia). The wire protocol
@@ -147,8 +173,11 @@ the editor (a text file is its own source). Architecture is strict MVP
   is registered — that's what makes wry set `AllowExternalDrop(false)`;
   without it the WebView2 page silently swallows drops (tao's
   `DroppedFile` never fires, the webview covers the whole client area).
-  The handler routes `DragDropEvent::Drop` paths into
-  `presenter.open_dropped`; the return value is ignored on Windows.
+  The handler picks a winner via `presenter.pick_dropped` (markdown,
+  then CSV, else the last path) and loads it on the render worker
+  (`request_open`; `presenter.open_dropped` is the synchronous twin
+  for tests); the previous document stays on screen until the new one
+  lands. The return value is ignored on Windows.
 - Startup handshake: `evaluate_script` right after `build` races
   WebView2's `NavigateToString` commit — a warm-started second instance
   regularly loses (the script runs in the still-blank document where
@@ -165,7 +194,9 @@ the editor (a text file is its own source). Architecture is strict MVP
   re-posts 'ready' at +250ms/+1s/+2.5s (idempotent host-side), and the
   view keeps a `ready_seen` flag with a watchdog that re-pushes the
   document every 500ms (after a 700ms grace, max 20 tries) until the
-  handshake lands. Debug such states via
+  handshake lands — quiet while the initial file's background load is
+  still in flight (`loading`): there is nothing to re-push until it
+  settles. Debug such states via
   `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`
   + CDP (`/json/list` → WebSocket → `Runtime.evaluate`) — the window
   title shows whether the *document* loaded (Rust side) while the DOM
@@ -184,8 +215,10 @@ the editor (a text file is its own source). Architecture is strict MVP
   file's raw HTML can't forge them.
 - Editing (the source pane is a `<textarea>`): typing is debounced 250ms
   in the shell, then posted as `edit\n<buffer>` over `window.ipc`; the
-  model re-renders (Rust owns rendering + ammonia) and the view answers
-  with `pound.setRendered(html, status, edited)` — which NEVER rewrites
+  model stores the buffer at once (see the render-worker note above)
+  and the worker re-renders (Rust owns rendering + ammonia) — the
+  result returns as a user event and the view answers with
+  `pound.setRendered(html, status, edited)` — which NEVER rewrites
   the textarea, so caret/selection/undo/scroll survive every keystroke.
   Full `pound.setContent(...)` (textarea rewrite + caret parked at top)
   runs only for real document loads. `save` posts over the same channel;
@@ -261,10 +294,12 @@ the editor (a text file is its own source). Architecture is strict MVP
   dropped at load by the view, refused at save by the ipc handler. A
   size outside the slider's range is refused too — a 0 size once hid
   every glyph (v0.11.0), so the shell also ignores non-positive sizes.
-- Window size: remembered across launches — saved to
-  `WindowWidth`/`WindowHeight` (physical px) on every resize except
-  while maximized, restored at startup when sane (minimums mirror the
-  builder's), default 1120×760 logical otherwise
+- Window size: remembered across launches — stashed on every resize
+  except while maximized, written to `WindowWidth`/`WindowHeight`
+  (physical px) once resizing goes quiet (~500ms debounce; a registry
+  write per Resized event was continuous I/O during live drags) and
+  flushed at exit (`LoopDestroyed`), restored at startup when sane
+  (minimums mirror the builder's), default 1120×760 logical otherwise
   (`register::window_size` + the `Resized` handler in `view.rs`).
 - Closing with unsaved changes: `CloseRequested` shows the shell's
   dialog via `pound.setClosePrompt(true)` instead of exiting. Its buttons

@@ -328,6 +328,10 @@
     display: flex; flex-direction: column; align-items: center;
     gap: 8px; padding-top: 24vh; color: var(--muted); text-align: center;
   }
+  /* The host injects this while the initial file's background load is
+     in flight (removed by the first setContent): the file's name is in
+     the title bar, so a fleeting welcome screen would only mislead. */
+  body.loading #welcome { display: none; }
   #welcome h1 { color: var(--text); font-size: 28px; margin: 0 0 4px; }
   #welcome code {
     background: var(--code-bg); border-radius: 5px; padding: 1px 5px;
@@ -599,6 +603,9 @@
   window.pound = {
     setContent(html, source, title, path, status, edited, mode) {
       document.body.dataset.mode = mode;
+      // A push means the initial background load settled (doc or error):
+      // the welcome screen may show again from here on.
+      document.body.classList.remove('loading');
       // The welcome state: an empty path means no file is open, so the
       // document actions stay hidden (body.no-doc rules). An open but
       // empty file keeps them — it has a path, just nothing rendered.

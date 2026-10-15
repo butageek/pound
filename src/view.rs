@@ -15,31 +15,36 @@
 //! - Local images are served through the `poundimg://` custom protocol.
 
 use std::cell::{Cell, RefCell};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tao::dpi::{LogicalSize, PhysicalSize, Size};
 use tao::event::{Event, WindowEvent};
-use tao::event_loop::{ControlFlow, EventLoop};
+use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 use tao::window::WindowBuilder;
 use wry::{http, DragDropEvent, WebView, WebViewBuilder, WebViewBuilderExtWindows};
 
 use crate::fonts;
 use crate::ipc::{self, json_str};
+use crate::model::{render_source, Document, FileType};
 use crate::presenter::{link_action, LinkAction, Presenter};
 use crate::register;
 use crate::theme::{DarkPalette, LightPalette, Settings, Theme};
 use crate::update::{self, plan_exit, ClosePromptAnswer, ExitPlan};
+
 /// The shell with the persisted settings and the installed font list
 /// injected (`window.poundSettings` / `window.poundFonts`): the head
 /// script resolves the theme and font before first paint, so the app
-/// never flashes the wrong ones.
-fn shell_html(settings: &Settings, fonts: &[String]) -> String {
+/// never flashes the wrong ones. `loading` adds the body class that
+/// keeps the welcome screen hidden while the initial file's background
+/// load is in flight (removed by the first `pound.setContent`).
+fn shell_html(settings: &Settings, fonts: &[String], loading: bool) -> String {
     const PLACEHOLDER: &str =
         "window.poundSettings = { mode: 'auto', light: 'solarized', dark: 'one-dark', font: '', size: 15.5 };";
     const FONTS_PLACEHOLDER: &str = "window.poundFonts = [];";
+    const BODY_PLACEHOLDER: &str = r#"<body data-mode="markdown" class="no-doc">"#;
     let font = match &settings.font {
         Some(name) => json_str(name),
         None => "''".to_owned(),
@@ -54,9 +59,140 @@ fn shell_html(settings: &Settings, fonts: &[String]) -> String {
     );
     let quoted: Vec<String> = fonts.iter().map(|n| json_str(n)).collect();
     let fonts_injected = format!("window.poundFonts = [{}];", quoted.join(", "));
+    let body_injected = if loading {
+        r#"<body data-mode="markdown" class="no-doc loading">"#
+    } else {
+        BODY_PLACEHOLDER
+    };
     SHELL_HTML
         .replace(PLACEHOLDER, &settings_injected)
         .replace(FONTS_PLACEHOLDER, &fonts_injected)
+        .replace(BODY_PLACEHOLDER, body_injected)
+}
+
+// ---- background rendering -------------------------------------------
+// Every file load and every debounced re-render runs on one worker
+// thread: rendering a large markdown or yaml file takes hundreds of ms
+// (syntect + ammonia), and doing that on the UI thread froze the window
+// — at startup it delayed the webview itself, during typing it stalled
+// the event loop. Results come back as tao user events so the loop
+// wakes the moment one lands (not on the next poll tick).
+
+/// A unit of work for the render worker. `gen` is the document
+/// generation the job belongs to: every open request bumps the
+/// generation, and results from an older one are dropped (a load that
+/// finishes after the user opened something else never replaces it).
+enum Job {
+    /// Load and render a whole file (initial open, drop, disk reload).
+    Open {
+        gen: u64,
+        path: PathBuf,
+        /// True when this load backs an auto-reload (the result adopts
+        /// with reload semantics: identical content is a no-op, unsaved
+        /// edits are never clobbered).
+        reload: bool,
+    },
+    /// Re-render the current document's buffer (a debounced edit).
+    Render {
+        gen: u64,
+        source: String,
+        spec: RenderSpec,
+    },
+}
+
+/// Everything a background render needs: the renderer dispatch (file
+/// type) and the document's directory (the base for image references).
+struct RenderSpec {
+    file_type: FileType,
+    base_dir: PathBuf,
+}
+
+/// A finished job, delivered to the event loop as a user event.
+enum RenderEvent {
+    Opened {
+        gen: u64,
+        reload: bool,
+        result: Result<Document, String>,
+    },
+    Rendered {
+        gen: u64,
+        html: String,
+    },
+}
+
+/// From a batch of already-queued jobs, keep only what still matters:
+/// the newest Open, and the newest Render queued after it. The older
+/// jobs' results would be dropped by the generation check anyway —
+/// skipping them keeps a slow render from falling behind fast typing.
+fn collapse(jobs: Vec<Job>) -> Vec<Job> {
+    let mut open_at: Option<usize> = None;
+    let mut render_at: Option<usize> = None;
+    for (i, job) in jobs.iter().enumerate() {
+        match job {
+            Job::Open { .. } => {
+                open_at = Some(i);
+                render_at = None;
+            }
+            Job::Render { .. } => render_at = Some(i),
+        }
+    }
+    jobs.into_iter()
+        .enumerate()
+        .filter(|(i, _)| open_at == Some(*i) || render_at == Some(*i))
+        .map(|(_, job)| job)
+        .collect()
+}
+
+/// Spawn the render worker (see the module note above). The thread ends
+/// with the job channel when the loop (and its senders) go away.
+fn spawn_render_worker(rx: std::sync::mpsc::Receiver<Job>, proxy: EventLoopProxy<RenderEvent>) {
+    std::thread::spawn(move || {
+        // Warm syntect's syntax set here (tens of ms, once per process):
+        // neither the first file's load nor the UI thread pays it later.
+        crate::markdown::warm_syntax_set();
+        while let Ok(job) = rx.recv() {
+            let mut batch = vec![job];
+            while let Ok(next) = rx.try_recv() {
+                batch.push(next);
+            }
+            for job in collapse(batch) {
+                match job {
+                    Job::Open { gen, path, reload } => {
+                        let result = Document::load(&path);
+                        let _ = proxy.send_event(RenderEvent::Opened {
+                            gen,
+                            reload,
+                            result,
+                        });
+                    }
+                    Job::Render { gen, source, spec } => {
+                        let html = render_source(&source, spec.file_type, &spec.base_dir);
+                        let _ = proxy.send_event(RenderEvent::Rendered { gen, html });
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Request a background load of `path` (open, drop, reload): bump the
+/// generation (older in-flight results become stale) and mark one in
+/// flight (the disk poll must not stack another).
+fn request_open(
+    jobs: &Arc<Mutex<std::sync::mpsc::Sender<Job>>>,
+    gen: &Cell<u64>,
+    open_in_flight: &Cell<bool>,
+    path: PathBuf,
+    reload: bool,
+) {
+    let next = gen.get() + 1;
+    gen.set(next);
+    open_in_flight.set(true);
+    let _ = jobs.lock().unwrap().send(Job::Open {
+        gen: next,
+        path,
+        reload,
+    });
 }
 
 /// How often to check the document for on-disk changes.
@@ -76,7 +212,14 @@ fn theme_background_of(settings: &Settings) -> (u8, u8, u8, u8) {
 }
 
 pub fn run(file: Option<PathBuf>) {
-    let event_loop = EventLoop::new();
+    // The event loop carries the render worker's results as user events:
+    // the loop wakes the instant one lands, not on the next poll tick.
+    let event_loop = EventLoopBuilder::<RenderEvent>::with_user_event().build();
+    // Background render worker (loads and debounced re-renders — see the
+    // module note above).
+    let (job_tx, job_rx) = std::sync::mpsc::channel::<Job>();
+    spawn_render_worker(job_rx, event_loop.create_proxy());
+    let jobs: Arc<Mutex<std::sync::mpsc::Sender<Job>>> = Arc::new(Mutex::new(job_tx));
 
     // Installed fonts: enumerated once, used to build the settings page
     // list, to validate the persisted name (a font that was uninstalled
@@ -111,14 +254,27 @@ pub fn run(file: Option<PathBuf>) {
         .build(&event_loop)
         .expect("create window");
 
-    let shared = Rc::new(RefCell::new(Presenter::new(file.as_deref())));
+    let shared = Rc::new(RefCell::new(Presenter::new(None)));
     let dirty = Rc::new(Cell::new(false));
-    // Set when a push must refresh only the preview (edits/save acks):
+    // Set when a push must refresh only the preview (edit renders):
     // rewriting the textarea would destroy the caret and scroll position.
     let preview = Rc::new(Cell::new(false));
+    // Set when only the status bar / save state / error banner changed
+    // (banner-only events: a full document push would re-send megabytes
+    // of html and rewrite the textarea for no visible reason).
+    let status_only = Rc::new(Cell::new(false));
     // Set when the user confirmed an exit (ipc handlers run inside WebView2
     // message dispatch and cannot touch ControlFlow themselves).
     let exit = Rc::new(Cell::new(false));
+    // The document generation: bumped on every open request; worker
+    // results carrying an older generation are stale and dropped.
+    let gen = Rc::new(Cell::new(0u64));
+    // True while the initial file's background load is in flight: the
+    // welcome screen stays hidden (`body.loading`) and pushes stay
+    // quiet — the settle delivers the first real content.
+    let loading = Rc::new(Cell::new(file.is_some()));
+    // An open/reload is in flight (the disk poll must not stack another).
+    let open_in_flight = Rc::new(Cell::new(false));
     // Whether the shell's 'ready' handshake ever arrived. WebView2 can
     // drop both the eager content push and the first 'ready' post to a
     // startup race (seen as an empty window over a loaded document);
@@ -161,7 +317,7 @@ pub fn run(file: Option<PathBuf>) {
     }
 
     let builder = WebViewBuilder::new()
-        .with_html(shell_html(&settings, &fonts))
+        .with_html(shell_html(&settings, &fonts, loading.get()))
         // Same pre-paint color as the window: the WebView2 surface must
         // not show its default white before the shell paints either.
         .with_background_color(background)
@@ -173,7 +329,9 @@ pub fn run(file: Option<PathBuf>) {
         .with_default_context_menus(false);
 
     let nav_presenter = shared.clone();
-    let nav_dirty = dirty.clone();
+    // Banner-only changes (dismissed errors, refused links) need a
+    // status push, not a full re-send of the document.
+    let nav_status = status_only.clone();
     // The navigation handler's first call is the shell document's own
     // load — allowed whatever URL the platform reports (see link_action).
     let nav_initial = Rc::new(Cell::new(true));
@@ -187,7 +345,10 @@ pub fn run(file: Option<PathBuf>) {
     let ipc_presenter = shared.clone();
     let ipc_dirty = dirty.clone();
     let ipc_preview = preview.clone();
+    let ipc_status = status_only.clone();
     let ipc_exit = exit.clone();
+    let ipc_jobs = Arc::clone(&jobs);
+    let ipc_gen = gen.clone();
     let ipc_update_on_exit = update_on_exit.clone();
     let ipc_show_close_prompt = show_close_prompt.clone();
     let ipc_update_ui = show_update_progress.clone();
@@ -196,6 +357,7 @@ pub fn run(file: Option<PathBuf>) {
     let ipc_export_toast = Arc::clone(&export_toast);
     let ipc_theme_changed = theme_changed.clone();
     let ipc_ready_seen = ready_seen.clone();
+    let ipc_loading = loading.clone();
     // Font list for validating settings-page saves (see fonts::families).
     let ipc_fonts = fonts.clone();
     let builder = builder.with_ipc_handler(move |request| {
@@ -216,7 +378,7 @@ pub fn run(file: Option<PathBuf>) {
                     ipc_presenter
                         .borrow_mut()
                         .fail(format!("could not start the updater: {e}"));
-                    ipc_preview.set(true);
+                    ipc_status.set(true);
                     false
                 }
             }
@@ -230,22 +392,28 @@ pub fn run(file: Option<PathBuf>) {
         match message {
             ipc::Message::Ready => {
                 ipc_ready_seen.set(true);
-                ipc_dirty.set(true);
+                // Nothing to push while the initial file is still loading
+                // (the settle pushes); otherwise the shell answered late
+                // and must be fed the current state.
+                if !ipc_loading.get() {
+                    ipc_dirty.set(true);
+                }
             }
             ipc::Message::Save => {
                 ipc_presenter.borrow_mut().save();
-                ipc_preview.set(true);
+                // The html did not change: status/save state only.
+                ipc_status.set(true);
             }
             ipc::Message::ExportHtml => {
                 // Success: the toast announces the file (delivered in
                 // MainEventsCleared — ipc handlers cannot evaluate
-                // scripts); failure or no-op falls to the preview push,
+                // scripts); failure or no-op falls to the status push,
                 // which shows the banner. The document is untouched.
                 match ipc_presenter.borrow_mut().export_html() {
                     Some(target) => {
                         *ipc_export_toast.lock().unwrap() = Some(target.display().to_string());
                     }
-                    None => ipc_preview.set(true),
+                    None => ipc_status.set(true),
                 }
             }
             ipc::Message::OpenExport { path } => {
@@ -253,7 +421,7 @@ pub fn run(file: Option<PathBuf>) {
                 // system browser (same path as web links; a miss — the
                 // file was deleted between export and click — banners).
                 if !ipc_presenter.borrow_mut().open_externally(&path) {
-                    ipc_preview.set(true);
+                    ipc_status.set(true); // banner-only
                 }
             }
             ipc::Message::SaveAndExit => {
@@ -270,7 +438,7 @@ pub fn run(file: Option<PathBuf>) {
                     ClosePromptAnswer::Save { saved },
                     ipc_update_on_exit.replace(false),
                 ) {
-                    ExitPlan::KeepOpen => ipc_preview.set(true),
+                    ExitPlan::KeepOpen => ipc_status.set(true),
                     ExitPlan::RunInstaller => {
                         // Progress mode: the installer closes us at the
                         // replace step; a failed spawn falls back to a
@@ -352,7 +520,7 @@ pub fn run(file: Option<PathBuf>) {
                 match link_action(&href, false) {
                     LinkAction::OpenExternally => {
                         if !ipc_presenter.borrow_mut().open_externally(&href) {
-                            ipc_dirty.set(true);
+                            ipc_status.set(true);
                         }
                     }
                     LinkAction::Refuse => {
@@ -369,7 +537,7 @@ pub fn run(file: Option<PathBuf>) {
                                     "could not open a new window for {}: {e}",
                                     path.display()
                                 ));
-                                ipc_dirty.set(true);
+                                ipc_status.set(true);
                             }
                         }
                     }
@@ -379,8 +547,32 @@ pub fn run(file: Option<PathBuf>) {
                 }
             }
             ipc::Message::Edit { text } => {
-                ipc_presenter.borrow_mut().edit_source(&text);
-                ipc_preview.set(true);
+                // Buffer-first: the model stores the text immediately (the
+                // title/status bar/save all act on the newest buffer) and
+                // the render runs on the worker — its result arrives as a
+                // user event and lands through pound.setRendered, which
+                // never touches the textarea.
+                let Some((file_type, base_dir)) = ipc_presenter.borrow().render_spec() else {
+                    return; // no document: nothing to edit
+                };
+                if !ipc_presenter.borrow_mut().edit_buffer(&text) {
+                    return; // unchanged buffer: no dirty marker, no render
+                }
+                // Status push now — dirty marker + fresh counts; the
+                // rendered html follows with the worker's result.
+                ipc_status.set(true);
+                // Plain files render nothing (the source pane IS the
+                // view): skip the round-trip.
+                if file_type != FileType::Plain {
+                    let _ = ipc_jobs.lock().unwrap().send(Job::Render {
+                        gen: ipc_gen.get(),
+                        spec: RenderSpec {
+                            file_type,
+                            base_dir,
+                        },
+                        source: text,
+                    });
+                }
             }
             ipc::Message::CsvSort { column } => {
                 // Table-only refresh: same flow as an edit, minus the
@@ -395,13 +587,18 @@ pub fn run(file: Option<PathBuf>) {
     // drag-drop handler is registered (wry sets AllowExternalDrop(false)
     // and installs its own controller) — without one, the page silently
     // swallows them and tao's DroppedFile never fires because the webview
-    // covers the whole client area.
+    // covers the whole client area. The pick (markdown, then CSV, then
+    // the last path) loads on the worker; the previous document stays on
+    // screen until the new one lands.
     let drop_presenter = shared.clone();
-    let drop_dirty = dirty.clone();
+    let drop_jobs = Arc::clone(&jobs);
+    let drop_gen = gen.clone();
+    let drop_in_flight = open_in_flight.clone();
     let builder = builder.with_drag_drop_handler(move |event| {
         if let DragDropEvent::Drop { paths, .. } = event {
-            drop_presenter.borrow_mut().open_dropped(&paths);
-            drop_dirty.set(true);
+            if let Some(path) = drop_presenter.borrow().pick_dropped(&paths) {
+                request_open(&drop_jobs, &drop_gen, &drop_in_flight, path, false);
+            }
         }
         true
     });
@@ -412,19 +609,35 @@ pub fn run(file: Option<PathBuf>) {
                 &url,
                 initial_load,
                 &mut nav_presenter.borrow_mut(),
-                &nav_dirty,
+                &nav_status,
             )
         })
         .build(&window)
         .expect("create webview");
 
-    // Paint whatever the initial file (if any) produced.
-    push_document(&webview, &shared.borrow());
-    window.set_title(&shared.borrow().title());
+    // The initial file (if any) loads on the worker: the window and the
+    // webview are already up, `body.loading` keeps the welcome screen
+    // hidden, and the provisional title names the file while it loads.
+    // The settle lands as a user event below and pushes the document.
+    if let Some(path) = file {
+        window.set_title(&provisional_title(&path));
+        request_open(&jobs, &gen, &open_in_flight, path, false);
+    } else {
+        // No file: paint the welcome screen right away.
+        push_document(&webview, &shared.borrow());
+        window.set_title(&shared.borrow().title());
+    }
 
     let mut last_pushed = shared.borrow().revision();
     let mut last_title = shared.borrow().title();
     let mut last_poll = Instant::now();
+    // Window-size persistence, debounced: a live resize fires Resized
+    // continuously, and a registry write per event is pure I/O churn.
+    // The latest size is stashed on each event, written once resizing
+    // goes quiet, and flushed on close (see flush_window_size).
+    const RESIZE_QUIET: Duration = Duration::from_millis(500);
+    let pending_size: Cell<Option<(u32, u32)>> = Cell::new(None);
+    let last_resize = Cell::new(Instant::now());
     // Handshake watchdog: re-push the document on a ladder until 'ready'
     // arrives (harmless when the first push landed). Bounded so a truly
     // dead bridge logs off instead of spinning forever.
@@ -444,6 +657,37 @@ pub fn run(file: Option<PathBuf>) {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + POLL_INTERVAL);
 
         match event {
+            // A background load or render finished. The generation check
+            // drops anything stale (a load that raced a newer open, a
+            // render of a document the user already replaced).
+            Event::UserEvent(RenderEvent::Opened {
+                gen: job_gen,
+                reload,
+                result,
+            }) => {
+                if job_gen == gen.get() {
+                    open_in_flight.set(false);
+                    loading.set(false);
+                    if reload {
+                        // Reload semantics: identical content is quiet,
+                        // in-flight edits win (Model::adopt_reload).
+                        if shared.borrow_mut().adopt_reload(result) {
+                            dirty.set(true);
+                        } else {
+                            status_only.set(true);
+                        }
+                    } else {
+                        shared.borrow_mut().adopt(result);
+                        dirty.set(true);
+                    }
+                }
+            }
+            Event::UserEvent(RenderEvent::Rendered { gen: job_gen, html }) => {
+                if job_gen == gen.get() && shared.borrow_mut().apply_render(html) {
+                    preview.set(true);
+                }
+            }
+
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
@@ -464,12 +708,13 @@ pub fn run(file: Option<PathBuf>) {
                 event: WindowEvent::Resized(size),
                 ..
             } => {
-                // Remember the size so the next launch opens like this one.
-                // Skip maximized windows: the restore size is the one
-                // worth keeping (maximizing is not remembered itself).
+                // Stash the size (debounced write — see MainEventsCleared)
+                // so the next launch opens like this one. Skip maximized
+                // windows: the restore size is the one worth keeping
+                // (maximizing is not remembered itself).
                 if !window.is_maximized() {
-                    register::save_setting("WindowWidth", &size.width.to_string());
-                    register::save_setting("WindowHeight", &size.height.to_string());
+                    pending_size.set(Some((size.width, size.height)));
+                    last_resize.set(Instant::now());
                 }
             }
 
@@ -477,7 +722,14 @@ pub fn run(file: Option<PathBuf>) {
                 if exit.get() {
                     *control_flow = ControlFlow::Exit;
                 }
+                // The window went quiet after a resize: persist the
+                // remembered size once (a write per Resized event was
+                // continuous registry I/O during live drags).
+                if pending_size.get().is_some() && last_resize.get().elapsed() >= RESIZE_QUIET {
+                    flush_window_size(&pending_size);
+                }
                 if !ready_seen.get()
+                    && !loading.get()
                     && started.elapsed() >= READY_RETRY_AFTER
                     && ready_retry_at.elapsed() >= READY_RETRY_EVERY
                     && ready_retries < READY_RETRY_MAX
@@ -552,21 +804,35 @@ pub fn run(file: Option<PathBuf>) {
                 {
                     eval_script(&webview, format!("pound.setUpdate({});", json_str(&tag)));
                 }
-                if last_poll.elapsed() >= POLL_INTERVAL {
+                if last_poll.elapsed() >= POLL_INTERVAL && !open_in_flight.get() {
                     last_poll = Instant::now();
-                    shared.borrow_mut().reload_if_changed();
+                    // Cheap mtime check only — when the disk moved, the
+                    // reload itself (read + render) runs on the worker.
+                    if shared.borrow_mut().poll_disk_changed() {
+                        if let Some(path) = shared.borrow().document_path() {
+                            request_open(&jobs, &gen, &open_in_flight, path, true);
+                        }
+                    }
                 }
                 let revision = shared.borrow().revision();
                 let pushed = if preview.get() {
-                    // Edit-driven refresh: rendered pane + status only.
+                    // Edit-render refresh: rendered pane + status only.
                     preview.set(false);
+                    status_only.set(false); // covered by push_rendered
                     last_pushed = revision;
                     push_rendered(&webview, &shared.borrow());
                     true
                 } else if dirty.get() || revision != last_pushed {
                     dirty.set(false);
+                    status_only.set(false); // covered by push_document
                     last_pushed = revision;
                     push_document(&webview, &shared.borrow());
+                    true
+                } else if status_only.replace(false) {
+                    // Banner/status-only refresh (dismissed error, save
+                    // ack…): neither pane is touched — no re-parse, no
+                    // image reloads, no textarea rewrite.
+                    push_status(&webview, &shared.borrow());
                     true
                 } else {
                     false
@@ -580,6 +846,13 @@ pub fn run(file: Option<PathBuf>) {
                 }
             }
 
+            // Every exit path funnels through here: persist a stashed
+            // window size one last time (resize-then-close must not lose
+            // it just because the debounce never went quiet).
+            Event::LoopDestroyed => {
+                flush_window_size(&pending_size);
+            }
+
             _ => {}
         }
     });
@@ -589,12 +862,13 @@ pub fn run(file: Option<PathBuf>) {
 /// links open externally, in-page anchors stay — everything else is
 /// refused with a message. The rules, and why the reader never
 /// navigates away from the shell document, live in [`link_action`]
-/// (`initial_load` allows the shell's own first load).
+/// (`initial_load` allows the shell's own first load). `status` is set
+/// when a banner-only change needs a push (never a full re-send).
 fn handle_navigation(
     url: &str,
     initial_load: bool,
     presenter: &mut Presenter,
-    dirty: &Cell<bool>,
+    status: &Cell<bool>,
 ) -> bool {
     match link_action(url, initial_load) {
         LinkAction::Internal => {
@@ -602,7 +876,7 @@ fn handle_navigation(
                 match command.split(['?', '#']).next().unwrap_or("") {
                     "dismiss-error" => {
                         presenter.dismiss_error();
-                        dirty.set(true);
+                        status.set(true);
                     }
                     _ => {}
                 }
@@ -611,16 +885,34 @@ fn handle_navigation(
         }
         LinkAction::OpenExternally => {
             if !presenter.open_externally(url) {
-                dirty.set(true);
+                status.set(true);
             }
             false
         }
         LinkAction::Refuse => {
             presenter.refuse_link(url);
-            dirty.set(true);
+            status.set(true);
             false
         }
         LinkAction::Stay => true,
+    }
+}
+
+/// The window title while the initial file is still loading in the
+/// background (the real title lands with the document).
+fn provisional_title(path: &Path) -> String {
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "untitled".to_owned());
+    format!("{name} — Pound")
+}
+
+/// Persist a stashed window size (see the debounced Resized handler).
+fn flush_window_size(pending: &Cell<Option<(u32, u32)>>) {
+    if let Some((width, height)) = pending.take() {
+        register::save_setting("WindowWidth", &width.to_string());
+        register::save_setting("WindowHeight", &height.to_string());
     }
 }
 

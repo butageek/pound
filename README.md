@@ -71,6 +71,10 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
   — the same class of engine VSCode's preview uses — with eye-comfort
   palettes from the editor world (Solarized Light, Catppuccin Latte,
   One Dark, Catppuccin Mocha) and native Segoe UI / Consolas typography.
+- **Never blocks** — every render (opens, reloads, live-edit
+  re-renders) runs on a background thread: the window appears
+  immediately even for huge files, and typing, scrolling and resizing
+  stay smooth while a large document re-renders.
 - **Settings page** — theme mode (Auto follows the system, Light, Dark),
   a light and a dark palette of your choice, and one typeface + size for
   every reading and editing surface — applied live and remembered across
@@ -126,14 +130,14 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
 
 | Layer | File | Responsibility |
 |---|---|---|
-| Model | `src/model.rs` | App state: open document (source, rendered HTML, CSV grid + sort), errors, unsaved/disk-conflict flags, reload revision. No UI types. |
+| Model | `src/model.rs` | App state: open document (source, rendered HTML, CSV grid + sort), errors, unsaved/disk-conflict flags, reload revision; hosts `render_source`, the one render dispatch. No UI types. |
 | Rendering input | `src/markdown.rs` | pulldown-cmark → HTML; rewrites local images to `poundimg://`; sanitizes with ammonia. Unit-tested headlessly. |
 | Rendering input | `src/csv.rs` | delimited text → sanitized, sortable HTML table; delimiter sniffing, numeric-aware sorts. Unit-tested headlessly. |
 | Rendering input | `src/code.rs` | toml/yaml source → sanitized, syntax-highlighted block (local TOML tokenizer; YAML via syntect). Unit-tested headlessly. |
 | Rendering input | `src/export.rs` | markdown source → standalone HTML export (self-contained page, relative image paths). Unit-tested headlessly. |
 | Presenter | `src/presenter.rs` | User intents: open/toggle, drag-and-drop routing, link opening. Owns the Model. |
 | JS bridge | `src/ipc.rs` | The shell↔host wire protocol (`ipc::Message`), headless-tested. |
-| View | `src/view.rs` | WebView2 shell (tao + wry): top bar, rendered pane, source pane, status bar. Displays the model, forwards intents. |
+| View | `src/view.rs` | WebView2 shell (tao + wry): top bar, rendered pane, source pane, status bar; owns the background render worker. Displays the model, forwards intents. |
 | Windows glue | `src/register.rs` | Registry integration (`register` / `unregister` subcommands). |
 
 ```

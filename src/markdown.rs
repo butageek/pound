@@ -126,10 +126,19 @@ fn first_token(info: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Syntect's packed default syntaxes, parsed once per process.
+/// Syntect's packed default syntaxes, parsed once per process (a few
+/// dozen ms — `warm_syntax_set` moves that off whatever thread would
+/// otherwise pay it).
 fn syntax_set() -> &'static SyntaxSet {
     static SET: OnceLock<SyntaxSet> = OnceLock::new();
     SET.get_or_init(SyntaxSet::load_defaults_newlines)
+}
+
+/// Force the syntax set to load now (called from a background thread at
+/// startup, so neither the first file load nor a UI-thread render pays
+/// the one-time parse).
+pub(crate) fn warm_syntax_set() {
+    let _ = syntax_set();
 }
 
 /// Highlight `code` as `language` into classed spans; `None` when the
@@ -268,13 +277,18 @@ fn localize_image(url: &str, base_dir: &Path) -> String {
 /// (`\\\\?\\C:\\…`) would otherwise put the drive colon inside the URL
 /// authority, which fails URL parsing and makes ammonia strip the src.
 fn percent_encode(path: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(path.len());
     for byte in path.bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 out.push(byte as char)
             }
-            _ => out.push_str(&format!("%{byte:02X}")),
+            _ => {
+                out.push('%');
+                out.push(HEX[(byte >> 4) as usize] as char);
+                out.push(HEX[(byte & 0x0f) as usize] as char);
+            }
         }
     }
     out
@@ -400,6 +414,63 @@ pub(crate) fn sanitize(raw: &str) -> String {
         .url_relative(ammonia::UrlRelative::PassThrough)
         .clean(raw)
         .to_string()
+}
+
+/// Performance smoke test for the render pipeline (kept ignored, like
+/// the dump_* helpers): run with
+/// `cargo test --release perf_render_paths -- --ignored --nocapture`
+/// and compare before/after when touching the renderers. Rendering runs
+/// on a background worker in the app, but throughput still bounds how
+/// quickly loads and debounced edits land.
+#[cfg(test)]
+mod perf_render_paths {
+    use super::*;
+    use std::time::Instant;
+
+    fn repeated(kb: usize, unit: &str) -> String {
+        let mut s = String::new();
+        for _ in 0..(kb * 1024 / unit.len()) {
+            s.push_str(unit);
+        }
+        s
+    }
+
+    #[test]
+    #[ignore = "benchmark helper: prints timings, asserts nothing"]
+    fn perf_render_paths() {
+        let dir = Path::new("/tmp");
+        // One-time warm-up (the render worker pays this at startup).
+        let t = Instant::now();
+        warm_syntax_set();
+        println!("syntax set warm-up: {:?}", t.elapsed());
+
+        let md_unit =
+            "The quick brown fox jumps over the lazy dog. *em* `code` [l](x.md) — two.\n\n\
+                       ```rust\nfn main() {\n    let x = 42;\n}\n```\n\n";
+        let toml_unit =
+            "# comment\n[server]\nhost = \"localhost\"  # inline\nport = 8080\nenabled = true\n\n";
+        let yaml_unit = "key: value\n# comment\nnested:\n  - a\n  - b\n";
+        for (name, unit, lang) in [
+            ("markdown", md_unit, None),
+            ("toml", toml_unit, Some("toml")),
+            ("yaml", yaml_unit, Some("yaml")),
+        ] {
+            for kb in [50, 200, 1000] {
+                let source = repeated(kb, unit);
+                let t = Instant::now();
+                let html = match lang {
+                    Some(lang) => crate::code::to_html(&source, lang),
+                    None => to_html(&source, dir),
+                };
+                println!(
+                    "{name:>8} render {:>4} KB -> {} KB: {:?}",
+                    source.len() / 1024,
+                    html.len() / 1024,
+                    t.elapsed()
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

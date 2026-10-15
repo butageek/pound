@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::model::{FileType, Model};
+use crate::model::{Document, FileType, Model};
 
 /// What a navigation request in the rendered pane should do.
 ///
@@ -123,6 +123,51 @@ impl Presenter {
         self.model.dismiss_error();
     }
 
+    // ---- background rendering (see the view's render worker) ----
+
+    /// Everything a background render of the current buffer needs: the
+    /// file type (which renderer) and the document's directory (the base
+    /// for image references). `None` with no document.
+    pub fn render_spec(&self) -> Option<(FileType, PathBuf)> {
+        self.model.document.as_ref().map(|doc| {
+            (
+                doc.file_type,
+                doc.path.parent().unwrap_or(Path::new(".")).to_path_buf(),
+            )
+        })
+    }
+
+    /// Take a background load's result (open, drop, initial file) — the
+    /// async half of [`Presenter::open_path`].
+    pub fn adopt(&mut self, result: Result<Document, String>) {
+        self.model.adopt(result);
+    }
+
+    /// Take a background reload's result (see `Model::adopt_reload`).
+    pub fn adopt_reload(&mut self, result: Result<Document, String>) -> bool {
+        self.model.adopt_reload(result)
+    }
+
+    /// The cheap disk-change poll (see `Model::poll_disk_changed`): no
+    /// file read — the view loads the file in the background when this
+    /// turns `true`.
+    pub fn poll_disk_changed(&mut self) -> bool {
+        self.model.poll_disk_changed()
+    }
+
+    /// Store a new editor buffer without re-rendering (the render runs
+    /// on the worker; its result arrives via [`Presenter::apply_render`]).
+    /// Returns whether the buffer changed.
+    pub fn edit_buffer(&mut self, text: &str) -> bool {
+        self.model.edit_buffer(text)
+    }
+
+    /// Deliver a background render; returns whether the html (and so the
+    /// view's re-push) changed.
+    pub fn apply_render(&mut self, html: String) -> bool {
+        self.model.apply_render(html)
+    }
+
     /// Apply an edit from the source pane (drives the live preview).
     pub fn edit_source(&mut self, text: &str) {
         self.model.edit(text);
@@ -148,16 +193,25 @@ impl Presenter {
     }
 
     /// Handle files dragged onto the window: prefer markdown, then CSV,
-    /// else the last thing dropped.
+    /// else the last thing dropped. Loads synchronously (tests, headless
+    /// callers); the GUI uses [`Presenter::pick_dropped`] and loads the
+    /// pick in the background.
     pub fn open_dropped(&mut self, paths: &[PathBuf]) {
+        if let Some(path) = self.pick_dropped(paths) {
+            self.open_path(&path);
+        }
+    }
+
+    /// Choose which dropped file to open (the choice half of
+    /// [`Presenter::open_dropped`], split so the view can load it off
+    /// the UI thread): prefer markdown, then CSV, else the last thing
+    /// dropped.
+    pub fn pick_dropped(&self, paths: &[PathBuf]) -> Option<PathBuf> {
         let prefer = |kind: FileType| paths.iter().rev().find(|p| FileType::from_path(p) == kind);
-        let Some(path) = prefer(FileType::Markdown)
+        prefer(FileType::Markdown)
             .or_else(|| prefer(FileType::Csv))
             .or_else(|| paths.last())
-        else {
-            return;
-        };
-        self.open_path(path);
+            .cloned()
     }
 
     /// Sort the CSV table by a column (a header click in the shell); the
@@ -170,7 +224,9 @@ impl Presenter {
     /// Open a web/mailto link — or the export toast's file — in the
     /// system browser, recording a banner error when the OS refuses it.
     /// Returns whether it opened (the caller re-pushes the banner only
-    /// on failure).
+    /// on failure). Called from the Windows view (and its ipc handler)
+    /// — hence the relaxed lint off-Windows.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn open_externally(&mut self, url: &str) -> bool {
         match open::that(url) {
             Ok(()) => true,
@@ -441,6 +497,58 @@ mod tests {
             presenter.model.document.as_ref().unwrap().path,
             crate::model::strip_verbatim_prefix(md.canonicalize().unwrap())
         );
+
+        // The pick (the async half) chooses without opening.
+        let chooser = Presenter::new(None);
+        assert_eq!(
+            chooser.pick_dropped(&[PathBuf::from("/tmp/z.csv"), PathBuf::from("/tmp/b.md")]),
+            Some(PathBuf::from("/tmp/b.md"))
+        );
+        assert_eq!(chooser.pick_dropped(&[]), None);
+    }
+
+    #[test]
+    fn background_flow_mirrors_the_synchronous_one() {
+        let dir = std::env::temp_dir().join(format!("pound-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("async.md");
+        std::fs::write(&path, "# hi").unwrap();
+
+        // open_path (sync) and adopt(load) (async) land in the same state.
+        let sync = Presenter::new(Some(&path));
+        let mut async_p = Presenter::new(None);
+        async_p.adopt(Document::load(&path));
+        assert_eq!(async_p.html(), sync.html());
+        assert_eq!(async_p.revision(), sync.revision());
+
+        // The render spec describes the open document.
+        let (file_type, base) = async_p.render_spec().unwrap();
+        assert_eq!(file_type, FileType::Markdown);
+        assert_eq!(
+            base,
+            sync.document_path()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .to_path_buf()
+        );
+        assert!(Presenter::new(None).render_spec().is_none());
+
+        // Buffer-first/apply-later keeps dirty and revision honest.
+        assert!(async_p.edit_buffer("# hi there"));
+        assert!(async_p.is_dirty());
+        assert_eq!(async_p.revision(), sync.revision());
+        let html = crate::model::render_source("# hi there", FileType::Markdown, &base);
+        assert!(async_p.apply_render(html.clone()));
+        assert!(async_p.html().contains("there"));
+        assert!(!async_p.apply_render(html), "identical html: no re-push");
+
+        // The wrappers save and adopt through the presenter too.
+        async_p.save();
+        assert!(!async_p.is_dirty(), "save ack clears the dirty marker");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# hi there");
+        assert!(!async_p.poll_disk_changed());
+        assert!(!async_p.adopt_reload(Document::load(&path)));
     }
 
     #[test]
