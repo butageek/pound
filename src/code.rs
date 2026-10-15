@@ -1,11 +1,11 @@
 //! Config-file rendering (rendering-input layer, like `markdown.rs` /
-//! `csv.rs`: pure string work, headless-testable). A whole TOML or YAML
-//! file becomes one sanitized, syntax-highlighted block for the
+//! `csv.rs`: pure string work, headless-testable). A whole TOML, YAML
+//! or JSON file becomes one sanitized, syntax-highlighted block for the
 //! rendered pane — TOML through a small hand-rolled tokenizer (syntect's
 //! default syntax set ships no TOML; the grammar is a dozen rules), YAML
-//! through syntect like fenced blocks in markdown. Either way the spans
-//! carry the shell's `--syn-*` token classes — no colors are baked in,
-//! every palette themes them.
+//! and JSON through syntect like fenced blocks in markdown. Either way
+//! the spans carry the shell's `--syn-*` token classes — no colors are
+//! baked in, every palette themes them.
 //!
 //! When highlighting declines (unknown language, or syntect refuses a
 //! line), the plain escaped block ships instead — rendering failures
@@ -22,6 +22,7 @@ pub fn language_for(path: &Path) -> Option<&'static str> {
     match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
         "toml" => Some("toml"),
         "yaml" | "yml" => Some("yaml"),
+        "json" => Some("json"),
         _ => None,
     }
 }
@@ -389,11 +390,28 @@ enabled = true
     }
 
     #[test]
+    fn json_files_highlight_through_syntect() {
+        let html = to_html("{\"port\": 8080, \"on\": true}\n", "json");
+        assert!(html.contains("language-json"), "{html}");
+        assert!(html.contains("<span class="), "classed spans: {html}");
+        // Content ships verbatim — the quotes sit in separate punctuation
+        // spans (nested spans may split it), so match whole tokens.
+        assert!(html.contains(">port<"), "{html}");
+        assert!(html.contains(">8080<"), "{html}");
+        assert!(
+            html.contains("constant numeric"),
+            "the number gets the constant color: {html}"
+        );
+    }
+
+    #[test]
     fn language_for_maps_extensions() {
         let f = |name: &str| language_for(Path::new(name));
         assert_eq!(f("Cargo.toml"), Some("toml"));
         assert_eq!(f("conf.yaml"), Some("yaml"));
         assert_eq!(f("CONF.YML"), Some("yaml")); // case-insensitive
+        assert_eq!(f("data.json"), Some("json"));
+        assert_eq!(f("PKG.JSON"), Some("json")); // case-insensitive
         assert_eq!(f("notes.md"), None);
         assert_eq!(f("noext"), None);
     }

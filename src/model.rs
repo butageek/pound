@@ -166,6 +166,7 @@ impl FileType {
             // renders); `yaml` serves both spellings.
             Some("toml") => FileType::Code("toml"),
             Some("yaml" | "yml") => FileType::Code("yaml"),
+            Some("json") => FileType::Code("json"),
             _ => FileType::Plain,
         }
     }
@@ -527,6 +528,8 @@ mod tests {
         assert_eq!(f("Cargo.toml"), FileType::Code("toml"));
         assert_eq!(f("CONF.YAML"), FileType::Code("yaml")); // case-insensitive
         assert_eq!(f("conf.yml"), FileType::Code("yaml"));
+        assert_eq!(f("data.json"), FileType::Code("json"));
+        assert_eq!(f("DATA.JSON"), FileType::Code("json")); // case-insensitive
         assert_eq!(f("log.txt"), FileType::Plain);
         assert_eq!(f("Makefile"), FileType::Plain); // no extension
         assert_eq!(f("archive.tar.gz"), FileType::Plain);
@@ -624,7 +627,7 @@ mod tests {
         assert_eq!(doc_with("md").type_label(), "Markdown");
         assert_eq!(doc_with("markdown").type_label(), "Markdown");
         assert_eq!(doc_with("txt").type_label(), "Plain text");
-        assert_eq!(doc_with("json").type_label(), "JSON file");
+        assert_eq!(doc_with("json").type_label(), "JSON"); // highlighted, not "JSON file"
         assert_eq!(doc_with("csv").type_label(), "CSV");
         assert_eq!(doc_with("").type_label(), "File");
     }
@@ -824,6 +827,17 @@ new **body**",
         assert_eq!(doc.file_type, FileType::Code("yaml"));
         assert_eq!(doc.type_label(), "YAML");
         assert!(doc.html.contains("language-yaml"), "{}", doc.html);
+
+        // JSON rides it too (its own syntax, same editor overlay).
+        let json = dir.join("config.json");
+        fs::write(&json, "{\"port\": 8080}\n").unwrap();
+        model.open(&json);
+        let doc = model.document.as_ref().unwrap();
+        assert_eq!(doc.file_type, FileType::Code("json"));
+        assert_eq!(doc.type_label(), "JSON");
+        assert!(doc.html.contains("language-json"), "{}", doc.html);
+        model.edit("{\"port\": 9090}\n");
+        assert!(model.document.as_ref().unwrap().html.contains("9090"));
     }
 
     #[test]

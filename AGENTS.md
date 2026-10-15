@@ -12,7 +12,7 @@ render by default with the raw source side by side (Ctrl+U), and the
 source pane is a live editor: typing re-renders the preview and `Ctrl+S`
 saves back to disk. Beyond markdown, `.csv`/`.tsv` files render as a
 sortable, column-resizable table (no source pane — data, not prose),
-`.toml`/`.yaml` files open in a single editor pane with syntax colors
+`.toml`/`.yaml`/`.json` files open in a single editor pane with syntax colors
 painted behind the text, and any other text file opens straight into
 the editor (a text file is its own source). Architecture is strict MVP
 (Model–View–Presenter) — keep it that way:
@@ -22,7 +22,7 @@ the editor (a text file is its own source). Architecture is strict MVP
 | Model | `src/model.rs` | state only, no UI types; hosts `render_source`, the one render dispatch loads/edits/the worker share |
 | Rendering input | `src/markdown.rs` | pulldown-cmark → sanitized HTML, unit-tested headlessly |
 | Rendering input | `src/csv.rs` | delimited text → sanitized, sortable HTML table (delimiter sniffing, numeric-aware sort, 10k-row render cap), unit-tested headlessly |
-| Rendering input | `src/code.rs` | toml/yaml source → sanitized, syntax-highlighted HTML block (hand-rolled TOML tokenizer — syntect ships none; YAML via syntect), unit-tested headlessly |
+| Rendering input | `src/code.rs` | toml/yaml/json source → sanitized, syntax-highlighted HTML block (hand-rolled TOML tokenizer — syntect ships none; YAML/JSON via syntect), unit-tested headlessly |
 | Rendering input | `src/export.rs` | markdown source → standalone HTML export (self-contained page: embedded CSS, `poundimg://` srcs rewritten to relative paths), unit-tested headlessly |
 | Presenter | `src/presenter.rs` | intents/use-cases; owns the Model behind a **private field** — the view mutates only via intents (`open_externally`, `refuse_link`, `fail`, …) and reads only via accessors (`html()`, `is_dirty()`, `revision()`, …), never `model.*` directly; no GUI types |
 | JS bridge | `src/ipc.rs` | the shell→host wire protocol (`ipc::Message`, `parse`) + host→shell string encoding (`json_str`); headless-tested |
@@ -61,9 +61,10 @@ the editor (a text file is its own source). Architecture is strict MVP
 - **`model::FileType` is the one source of truth** for rendering, pane
   layout and `type_label`: `Markdown` (`.md`/`.markdown`) renders the
   preview + editable source side by side; `Csv` (`.csv`/`.tsv`) renders
-  a table-only view; `Code` (`.toml`, `.yaml`/`.yml` — the payload is
-  the syntect token) renders a **single editor pane highlighted in
-  place** (`code.rs`; `data-mode="code"`): the source textarea's text
+  a table-only view; `Code` (`.toml`, `.yaml`/`.yml`, `.json` — the
+  payload is the syntect token) renders a **single editor pane
+  highlighted in place** (`code.rs`; `data-mode="code"`):
+  the source textarea's text
   is transparent and an identically-metriced `#source-highlight` pre
   behind it paints the host's colored spans — native caret/undo, one
   pane, no Source toggle; typing mirrors the plain buffer into the
@@ -404,7 +405,9 @@ Windows cross-check).
 - Everything is HKCU-only: ProgIds `Pound.md`, `Pound.table` and
   `Pound.text`, and for every extension in `register.rs`'s
   `ASSOCIATIONS` table (markdown, data tables, and a curated
-  plain-text set — `.txt`, `.log`, `.ini` … `.toml`) an
+  plain-text set — `.txt`, `.log`, `.ini` … `.toml`; `.json` registers
+  there too but renders highlighted — the association ProgId and the
+  render dispatch are independent) an
   `OpenWithProgids` entry, an `Explorer\FileExts\<ext>\OpenWithProgids`
   entry,
   `RegisteredApplications` + `Software\Pound\Capabilities` (this is

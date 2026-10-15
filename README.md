@@ -13,8 +13,8 @@
 **Pound** is a lightweight **file viewer for Windows** written in Rust.
 Drop a file, see it properly: markdown renders with a live-editable
 source pane beside it, `.csv`/`.tsv` become sortable tables, `.toml` /
-`.yaml` open in a syntax-highlighted editor, and any other text file
-opens straight into the editor.
+`.yaml` / `.json` open in a syntax-highlighted editor, and any other
+text file opens straight into the editor.
 
 > Working MVP: Windows 10/11. Development happens on Linux/WSL; see
 > [AGENTS.md](AGENTS.md) for the environment, build and release playbook
@@ -40,10 +40,10 @@ irm https://raw.githubusercontent.com/butageek/pound/main/tools/install.ps1 | ie
 
 This downloads the latest release build from GitHub, copies it to
 `%LOCALAPPDATA%\Pound`, adds a Start Menu shortcut and your user `PATH`,
-and registers Pound with Windows so markdown, data and plain-text
-files (`.md`, `.csv`, `.tsv`, `.txt`, `.log`, `.ini`, `.json` and
-friends) can open with it. Then right-click any of those files →
-**Open with** → **Pound** (tick *Always*).
+and registers Pound with Windows so markdown, data, config and
+plain-text files (`.md`, `.csv`, `.tsv`, `.toml`, `.yaml`, `.json`,
+`.txt`, `.log`, `.ini` and friends) can open with it. Then right-click
+any of those files → **Open with** → **Pound** (tick *Always*).
 
 **Upgrades use the exact same command** — it detects an existing install,
 closes a running Pound (gracefully, then forcefully), replaces the exe,
@@ -81,7 +81,8 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
   starts.
 - Opens files from double-click, drag-and-drop, or the command line
   (`pound file.md`): `.md`/`.markdown` render, `.csv`/`.tsv` open as
-  tables, any other text file opens in the editor.
+  tables, `.toml`/`.yaml`/`.json` open highlighted, any other
+  text file opens in the editor.
 - **Rendered view by default**, with a **Source toggle** that opens a
   side-by-side panel showing the raw markdown. Shortcut: `Ctrl+U`.
 - **Synced scrolling** — in split view, scrolling either pane scrolls the
@@ -104,13 +105,13 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
   render the first 10,000 rows with a note of the true count.
 - **Plain text just opens** — a text file is its own source: `.txt`,
   `.log`, whatever, it opens straight into the editor. Pound registers
-  for the common text types (`.txt`, `.log`, `.ini`, `.json` and
-  friends) so it sits in their "Open with" lists — nothing is claimed
-  as a default; you pick.
-- **TOML and YAML open in a highlighted editor** — one pane, colors in
-  place: the same editor as plain text (native caret, undo, Ctrl+S)
-  with syntax colors painted behind the text, updating as you type and
-  following your theme. (`.toml`, `.yaml`, `.yml`)
+  for the common text types (`.txt`, `.log`, `.ini` and friends, plus
+  the config types below) so it sits in their "Open with" lists —
+  nothing is claimed as a default; you pick.
+- **TOML, YAML and JSON open in a highlighted editor** — one pane,
+  colors in place: the same editor as plain text (native caret, undo,
+  Ctrl+S) with syntax colors painted behind the text, updating as you
+  type and following your theme. (`.toml`, `.yaml`, `.yml`, `.json`)
 - **Status bar**: full path of the open file plus its type — character
   and line counts for text, rows and columns for tables.
 - Full CommonMark via pulldown-cmark: tables, task lists, strikethrough,
@@ -158,8 +159,8 @@ into HTML+CSS instead of being hand-laid-out by the GUI toolkit.
   `pound file.md`, or drag a file onto the window.
 - Markdown renders immediately; `.csv`/`.tsv` open as a table — click a
   header to sort, drag a header edge to resize that column; `.toml` /
-  `.yaml` open highlighted in the editor; any other text file opens
-  straight in the editor.
+  `.yaml` / `.json` open highlighted in the editor; any other text file
+  opens straight in the editor.
 - Click **Source** (top right) or press `Ctrl+U` to toggle the side-by-side
   raw markdown panel. In split view, scrolling either pane scrolls the
   other to the matching position.
@@ -255,7 +256,7 @@ Pound reads and edits what it opens today — markdown, CSV/TSV,
 TOML/YAML and plain text. Ideas for what's next:
 
 - [ ] More file types beyond those (issues with your pet format welcome)
-- [x] Syntax highlighting in the source pane (TOML/YAML files, and
+- [x] Syntax highlighting in the source pane (TOML/YAML/JSON files, and
       ```toml fences in markdown)
 - [ ] Table of contents sidebar; footnotes; remote images
 - [ ] winget manifest once the release has some real-world use
