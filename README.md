@@ -112,6 +112,10 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
   colors in place: the same editor as plain text (native caret, undo,
   Ctrl+S) with syntax colors painted behind the text, updating as you
   type and following your theme. (`.toml`, `.yaml`, `.yml`, `.json`)
+  Minified monsters open too: a file whose longest line runs past a few
+  thousand characters soft-wraps (and skips colors) instead of blanking
+  the pane — a single multi-megabyte line is one continent-wide text
+  row no renderer will ever paint.
 - **Status bar**: full path of the open file plus its type — character
   and line counts for text, rows and columns for tables.
 - Full CommonMark via pulldown-cmark: tables, task lists, strikethrough,
@@ -134,7 +138,7 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
 | Model | `src/model.rs` | App state: open document (source, rendered HTML, CSV grid + sort), errors, unsaved/disk-conflict flags, reload revision; hosts `render_source`, the one render dispatch. No UI types. |
 | Rendering input | `src/markdown.rs` | pulldown-cmark → HTML; rewrites local images to `poundimg://`; sanitizes with ammonia. Unit-tested headlessly. |
 | Rendering input | `src/csv.rs` | delimited text → sanitized, sortable HTML table; delimiter sniffing, numeric-aware sorts. Unit-tested headlessly. |
-| Rendering input | `src/code.rs` | toml/yaml source → sanitized, syntax-highlighted block (local TOML tokenizer; YAML via syntect). Unit-tested headlessly. |
+| Rendering input | `src/code.rs` | toml/yaml/json source → sanitized, syntax-highlighted block (hand-rolled TOML tokenizer; YAML/JSON via syntect); owns the extension→token mapping (`language_for`). Unit-tested headlessly. |
 | Rendering input | `src/export.rs` | markdown source → standalone HTML export (self-contained page, relative image paths). Unit-tested headlessly. |
 | Presenter | `src/presenter.rs` | User intents: open/toggle, drag-and-drop routing, link opening. Owns the Model. |
 | JS bridge | `src/ipc.rs` | The shell↔host wire protocol (`ipc::Message`), headless-tested. |

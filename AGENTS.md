@@ -75,7 +75,11 @@ the editor (a text file is its own source). Architecture is strict MVP
   second pane, no Source toggle, full editor right-click menu, inert
   scroll sync. The shell picks the layout from the mode string pushed
   with the document (`body[data-mode="markdown|plain|csv|code"]` CSS;
-  `presenter::view_mode`).
+  `presenter::view_mode`). The extension→`Code` token mapping lives
+  once, in `code::language_for` — `FileType::from_path` delegates to
+  it (a second copy once sat inline in `from_path` and left
+  `language_for` production-dead, flagged by every non-test Windows
+  check as "never used" while its test kept it green).
 - **CSV files (`csv.rs`)**: the delimiter is sniffed from the first
   line (`,` `;` tab `|`, outside quotes), the first row is the header,
   and cells are escaped + ammonia-sanitized (file content never
