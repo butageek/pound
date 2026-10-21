@@ -141,13 +141,24 @@ pub(crate) fn warm_syntax_set() {
     let _ = syntax_set();
 }
 
+/// A line longer than this declines highlighting: syntect's regexes go
+/// superlinear on very long lines, and a multi-megabyte minified file
+/// would highlight into hundreds of thousands of spans nobody can use.
+/// The plain escaped block ships instead — content first, colors second.
+/// (The layout side — the pane must wrap such lines or WebView2 stops
+/// presenting frames at all — is the shell's `body.src-wrap` fallback.)
+const MAX_HIGHLIGHT_LINE: usize = 16 * 1024;
+
 /// Highlight `code` as `language` into classed spans; `None` when the
-/// language is unknown or syntect declines a line — callers then keep
-/// the plain rendering, never eating content. Also used by the
-/// config-file view (`code.rs`).
+/// language is unknown, a line is pathologically long, or syntect
+/// declines a line — callers then keep the plain rendering, never eating
+/// content. Also used by the config-file view (`code.rs`).
 pub(crate) fn highlighted(code: &str, language: &str) -> Option<String> {
     let syntaxes = syntax_set();
     let syntax = syntaxes.find_syntax_by_token(language)?;
+    if code.lines().any(|line| line.len() > MAX_HIGHLIGHT_LINE) {
+        return None;
+    }
     let mut generator =
         ClassedHTMLGenerator::new_with_class_style(syntax, syntaxes, ClassStyle::Spaced);
     for line in code.split_inclusive('\n') {
@@ -166,8 +177,25 @@ pub(crate) fn highlighted(code: &str, language: &str) -> Option<String> {
             .ok()?;
     }
     let mut html = generator.finalize();
-    if !code.ends_with('\n') {
-        html.truncate(html.strip_suffix('\n')?.len());
+    // finalize() appends `</span>`s for scopes still open at EOF — after
+    // the last line's newline, so the newline is no longer the trailing
+    // text and a bare strip_suffix('\n') would decline the whole
+    // highlight: a minified JSON is one line inside one open string
+    // scope, so every minified file used to render uncolored. Close the
+    // spans around the trim instead of refusing to render.
+    let mut closes = 0usize;
+    while html.ends_with("</span>") {
+        html.truncate(html.len() - "</span>".len());
+        closes += 1;
+    }
+    // A final line without its own newline got one added above (the
+    // unterminated block must gain no blank line); now that the closes
+    // are out of the way, trim it back exactly when synthesized.
+    if !code.ends_with('\n') && html.ends_with('\n') {
+        html.truncate(html.len() - 1);
+    }
+    for _ in 0..closes {
+        html.push_str("</span>");
     }
     // The wrapper mirrors pulldown's plain rendering (`<pre><code
     // class="language-x">`) so block styling and the copy button keep

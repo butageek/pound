@@ -310,6 +310,26 @@
   }
   body[data-mode="code"] #source::selection { background: rgba(128,128,128,0.35); }
 
+  /* Pathologically long lines — a minified JSON is one multi-megabyte
+     line — lay out as a single line-box millions of pixels wide, and
+     WebView2's compositor can never raster that layer: no frame ever
+     presents and the window keeps showing the stale empty shell (the
+     DOM is actually full). Documents carrying such lines flip the panes
+     into soft wrap instead: same bytes, paintable rows. Toggled by
+     syncSourceWrap(); the textarea's wrap mode is an attribute, set
+     there alongside this class. */
+  body.src-wrap #source,
+  body.src-wrap #source-highlight {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  /* The markdown preview's fenced blocks hit the same cliff with a long
+     line in the source file; wrapped rows beat a dead pane. */
+  body.src-wrap #content pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
   /* ---- status bar ---- */
   #statusbar {
     position: fixed; inset: auto 0 0 0; height: 26px; z-index: 10;
@@ -622,6 +642,9 @@
       // Park the caret at the top: a value assignment leaves it at the
       // end, so the first focus would auto-scroll the pane to the bottom.
       sourceEl.setSelectionRange(0, 0);
+      // Wrap-pathological documents (see syncSourceWrap) flip before the
+      // highlight lands, so the overlay pre styles with the pane.
+      syncSourceWrap(source);
       // Code files highlight in the editor itself: the overlay pre
       // takes the host's colored block; other modes clear it.
       setCodeHighlight(mode === 'code' ? html : null);
@@ -898,6 +921,26 @@
     sourceHighlight.scrollLeft = sourceEl.scrollLeft;
   }
 
+  // A line over this many chars is not code any more — it's a dump
+  // (minified JSON, a pasted blob) — and unwrapped it lays out a
+  // line-box no rasterizer will ever paint: the pane blanks out (see
+  // body.src-wrap). Such documents get soft wrap; real code never does.
+  const SRC_WRAP_LINE = 4000;
+  let sourceWrapped = false;
+  function syncSourceWrap(text) {
+    let run = 0;
+    let over = false;
+    for (let i = 0; i < text.length; i++) {
+      if (text.charCodeAt(i) === 10) run = 0;
+      else if (++run > SRC_WRAP_LINE) { over = true; break; }
+    }
+    if (over !== sourceWrapped) {
+      sourceWrapped = over;
+      document.body.classList.toggle('src-wrap', over);
+      sourceEl.wrap = over ? 'soft' : 'off';
+    }
+  }
+
   // Export HTML: the host renders the live buffer into a standalone
   // page next to the source (markdown documents only — the button is
   // hidden in the other modes and disabled with no document open).
@@ -924,7 +967,12 @@
     // Keep the overlay honest while the debounced round-trip runs.
     if (document.body.dataset.mode === 'code') setCodeHighlight(null);
     clearTimeout(editTimer);
-    editTimer = setTimeout(() => hostSend('edit\n' + sourceEl.value), 250);
+    editTimer = setTimeout(() => {
+      // A paste can push the document over (or back under) the line
+      // cap — keep the wrap fallback in step with the buffer.
+      syncSourceWrap(sourceEl.value);
+      hostSend('edit\n' + sourceEl.value);
+    }, 250);
   });
 
   addEventListener('keydown', e => {

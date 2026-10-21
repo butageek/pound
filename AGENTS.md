@@ -118,6 +118,23 @@ the editor (a text file is its own source). Architecture is strict MVP
   `class`). The fence info string's first token is the language
   (```rust,ignore → rust). syntect is built with `regex-fancy` (pure
   Rust, no oniguruma) and without the default themes dump.
+- **Pathologically long lines soft-wrap** (`body.src-wrap`, flipped by
+  the shell's `syncSourceWrap`, cap 4000 chars): a minified JSON is one
+  multi-megabyte line, and unwrapped it lays out a line-box millions of
+  pixels wide that WebView2's compositor can never raster — no frame
+  ever presents, and the window keeps showing the stale empty shell
+  while the DOM is actually full (content-push, geometry and JS all
+  fine, which is what made it look like "no content"; found by CDP on
+  the live window). The pane (and markdown preview's fenced blocks)
+  wrap instead: same bytes, paintable rows. Highlighting declines per
+  line at `markdown::MAX_HIGHLIGHT_LINE` (16k) — syntect goes
+  superlinear on long lines and a 2 MB minified file would highlight
+  into ~340k spans — so such files render as the plain escaped block.
+  Related syntect trap, cost minified files their colors since the
+  JSON editor shipped: `ClassedHTMLGenerator::finalize` appends
+  `</span>`s for scopes open at EOF AFTER the last newline, so a bare
+  `strip_suffix('\n')` declines the whole highlight; close the spans
+  around the trim (minified_json_one_line_still_highlights).
 - **Rendering happens on a background worker** (`view.rs`: a job
   channel + tao user events; `model::render_source` is the one render
   dispatch). Opening a file (startup arg, drag-drop, a link's new

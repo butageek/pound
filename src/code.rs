@@ -405,6 +405,50 @@ enabled = true
     }
 
     #[test]
+    fn minified_json_one_line_still_highlights() {
+        // Regression: syntect's finalize() appends </span>s for scopes
+        // still open at EOF AFTER the last newline, so the old
+        // strip_suffix('\n') declined every minified single-line file —
+        // the whole file is one line inside one open string scope — and
+        // they all rendered uncolored, silently.
+        let src = r#"{"openapi":"3.0.1","info":{"x":1},"paths":{}}"#;
+        let html = crate::markdown::highlighted(src, "json")
+            .expect("a minified json highlights like any other file");
+        assert!(html.contains("<span"), "classed spans: {html}");
+        assert!(
+            html.matches("<span").count() == html.matches("</span>").count(),
+            "spans balance: {html}"
+        );
+        assert!(html.contains(">openapi<"), "content survives: {html}");
+        // Same through the file dispatch: still colored (well under the
+        // pathological-line cap), no trailing newline to mirror.
+        let html = to_html(src, "json");
+        assert!(html.contains("<span class="), "{html}");
+    }
+
+    #[test]
+    fn pathological_lines_decline_to_plain_block() {
+        // One line over the cap: highlighting declines and the plain
+        // escaped block ships — content intact, no span explosion (the
+        // shell wraps such documents; see body.src-wrap in shell.html).
+        let mut src = String::from("{\"a\":\"");
+        src.push_str(&"x".repeat(20 * 1024));
+        src.push_str("\"}");
+        assert_eq!(
+            crate::markdown::highlighted(&src, "json"),
+            None,
+            "a 20k-char line declines"
+        );
+        let html = to_html(&src, "json");
+        assert!(
+            !html.contains("<span"),
+            "plain block, no spans: first 80 = {}",
+            &html[..80]
+        );
+        assert!(html.contains("{\"a\":\""), "content survives: {html}");
+    }
+
+    #[test]
     fn language_for_maps_extensions() {
         let f = |name: &str| language_for(Path::new(name));
         assert_eq!(f("Cargo.toml"), Some("toml"));
