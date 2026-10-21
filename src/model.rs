@@ -162,12 +162,13 @@ impl FileType {
         match ext.as_deref() {
             Some("md" | "markdown") => FileType::Markdown,
             Some("csv" | "tsv") => FileType::Csv,
-            // The payload is the syntect token (also what `code.rs`
-            // renders); `yaml` serves both spellings.
-            Some("toml") => FileType::Code("toml"),
-            Some("yaml" | "yml") => FileType::Code("yaml"),
-            Some("json") => FileType::Code("json"),
-            _ => FileType::Plain,
+            // The payload is the syntect token — one mapping lives in
+            // `code.rs::language_for` (the token `code.rs` renders too);
+            // everything else is `Plain`.
+            _ => match crate::code::language_for(path) {
+                Some(language) => FileType::Code(language),
+                None => FileType::Plain,
+            },
         }
     }
 }
