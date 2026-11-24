@@ -1,6 +1,6 @@
 [package]
 name = "pound"
-version = "0.21.1"
+version = "0.22.0"
 edition = "2021"
 # `usize::is_multiple_of` (presenter.rs) needs 1.87; say so instead of
 # failing with an opaque method-not-found error on older toolchains.
