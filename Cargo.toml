@@ -2,7 +2,10 @@
 name = "pound"
 version = "0.21.1"
 edition = "2021"
-description = "A small markdown reader with a side-by-side source pane"
+# `usize::is_multiple_of` (presenter.rs) needs 1.87; say so instead of
+# failing with an opaque method-not-found error on older toolchains.
+rust-version = "1.87"
+description = "A lightweight file viewer for Windows: markdown with a live source pane, CSV tables, config files, plain text"
 license = "MIT"
 authors = ["Hendry Chou"]
 repository = "https://github.com/butageek/pound"

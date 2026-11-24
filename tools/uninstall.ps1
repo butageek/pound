@@ -1,9 +1,22 @@
-# Pound uninstaller. Removes registry entries, shortcut, install dir, and
-# the PATH entry created by install.ps1.
+# Pound uninstaller. Removes registry entries, shortcut, Pound's own files
+# in the install dir (the folder itself only if nothing else lives there)
+# and the PATH entry created by install.ps1 (its registry kind intact).
+#
+# In PowerShell 7:
+#   irm https://raw.githubusercontent.com/butageek/pound/main/tools/uninstall.ps1 | iex
+# Windows PowerShell 5.1 cannot iex a script with a param block - there,
+# download it and run it as a file:
+#   powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/uninstall.ps1 -OutFile $env:TEMP\pound-uninstall.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\pound-uninstall.ps1"
 #Requires -Version 5.1
 [CmdletBinding()]
 param(
-    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Pound')
+    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Pound'),
+
+    # Terminate a Pound that did not close gracefully within the grace
+    # period. Off by default: a Pound still alive after CloseMainWindow is
+    # usually showing the unsaved-changes prompt, and killing it would
+    # silently discard the user's edits.
+    [switch]$Force
 )
 $ErrorActionPreference = 'Stop'
 
@@ -18,6 +31,51 @@ if (-not (Test-Path -LiteralPath $InstallDir)) {
 }
 
 function Write-Step([string]$msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
+
+# The user PATH, read raw and written back with its registry kind intact.
+# [Environment]::GetEnvironmentVariable('Path','User') hands back the
+# EXPANDED value and SetEnvironmentVariable writes REG_SZ, so that pair
+# silently downgraded a REG_EXPAND_SZ PATH and froze every %VAR% entry in
+# it (the classic setx pitfall). The registry API can do both right.
+function Get-UserPath {
+    # Always answers: a missing PATH comes back empty + ExpandString (how
+    # Windows creates a new one), so callers need no $null handling.
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
+    if (-not $key -or $key.GetValueNames() -notcontains 'Path') {
+        if ($key) { $key.Close() }
+        return [pscustomobject]@{ Value = ''; Kind = 'ExpandString' }
+    }
+    try {
+        $raw = $key.GetValue('Path', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        if ($raw -is [array]) { $raw = $raw -join ';' } # a REG_MULTI_SZ PATH
+        $kind = 'String'
+        if ($key.GetValueKind('Path') -eq [Microsoft.Win32.RegistryValueKind]::ExpandString) { $kind = 'ExpandString' }
+        return [pscustomobject]@{ Value = [string]$raw; Kind = $kind }
+    }
+    finally { $key.Close() }
+}
+function Set-UserPath([string]$value, [string]$kind) {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    if (-not $key) { throw 'cannot open HKCU\Environment for writing' }
+    try {
+        $vk = [Microsoft.Win32.RegistryValueKind]::String
+        if ($kind -eq 'ExpandString') { $vk = [Microsoft.Win32.RegistryValueKind]::ExpandString }
+        $key.SetValue('Path', $value, $vk)
+    }
+    finally { $key.Close() }
+    # Broadcast WM_SETTINGCHANGE the way SetEnvironmentVariable did, so
+    # new processes (anything launched from Explorer) see the new PATH
+    # without a logoff. HWND_BROADCAST=0xFFFF, WM_SETTINGCHANGE=0x1A,
+    # SMTO_ABORTIFHUNG=2.
+    if (-not ('Pound.NativeMethods' -as [type])) {
+        Add-Type -Namespace Pound -Name NativeMethods -MemberDefinition @'
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+'@
+    }
+    $result = [UIntPtr]::Zero
+    [void][Pound.NativeMethods]::SendMessageTimeout([IntPtr]0xFFFF, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result)
+}
 
 # Close any Pound windows running from the given exe path so the install
 # folder can be removed (Windows locks a running executable).
@@ -46,11 +104,19 @@ function Stop-PoundProcesses {
         catch { $left = 0 }
     }
     if ($left -gt 0) {
-        try {
-            Get-Process -Name 'pound' -ErrorAction SilentlyContinue |
-                Where-Object { $_.Path -eq $ExePath } | Stop-Process -Force -ErrorAction SilentlyContinue
+        if ($Force) {
+            Write-Host '  still running: terminating (unsaved edits are lost)' -ForegroundColor Yellow
+            try {
+                Get-Process -Name 'pound' -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Path -eq $ExePath } | Stop-Process -Force -ErrorAction SilentlyContinue
+            }
+            catch { }
         }
-        catch { }
+        else {
+            # Graceful close declined or waiting on the unsaved-changes
+            # prompt: killing it would silently discard the user's edits.
+            throw "Pound is still running - it may be showing the unsaved-changes prompt. Save or discard your edits, close it, and run this again (or pass -Force to discard them)."
+        }
     }
     Start-Sleep -Milliseconds 300 # let the OS release the file handle
 }
@@ -84,17 +150,36 @@ if (Test-Path -LiteralPath $shortcutPath) {
 }
 
 # ------------------------------------------------------------ PATH entry ---
+# The value keeps its registry kind and its unexpanded %VAR% entries (see
+# Get-UserPath).
 Write-Step 'Removing PATH entry'
-$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-if ($null -ne $userPath -and ($userPath -split ';') -contains $InstallDir) {
-    $newPath = ($userPath -split ';' | Where-Object { $_ -ne $InstallDir -and $_ -ne '' }) -join ';'
-    [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+$userPath = Get-UserPath
+if (($userPath.Value -split ';') -contains $InstallDir) {
+    $newPath = ($userPath.Value -split ';' | Where-Object { $_ -ne $InstallDir -and $_ -ne '' }) -join ';'
+    Set-UserPath $newPath $userPath.Kind
 }
 
 # ---------------------------------------------------------- install dir ----
 Write-Step "Removing $InstallDir"
 if (Test-Path -LiteralPath $InstallDir) {
-    try { Remove-Item -LiteralPath $InstallDir -Recurse -Force } catch { Write-Warning "could not remove $InstallDir (delete it manually): $_" }
+    # Delete only what the installer put there — pound.exe and any helper
+    # DLLs it copied along — never -Recurse into the folder itself: a user
+    # who installed with -InstallDir C:\Tools must not lose that folder.
+    $installed = @('pound.exe') + @(Get-ChildItem -LiteralPath $InstallDir -Filter '*.dll' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+    foreach ($name in $installed) {
+        $file = Join-Path $InstallDir $name
+        if (Test-Path -LiteralPath $file) {
+            try { Remove-Item -LiteralPath $file -Force } catch { Write-Warning "could not remove ${file}: $_" }
+        }
+    }
+    # The folder itself goes only when nothing else is left in it.
+    $left = @(Get-ChildItem -LiteralPath $InstallDir -Force -ErrorAction SilentlyContinue)
+    if ($left.Count -eq 0) {
+        try { Remove-Item -LiteralPath $InstallDir -Force } catch { Write-Warning "could not remove $InstallDir (delete it manually): $_" }
+    }
+    else {
+        Write-Host "  kept $InstallDir ($($left.Count) other item(s) in it)" -ForegroundColor DarkGray
+    }
 }
 
 Write-Host 'Pound uninstalled.' -ForegroundColor Green

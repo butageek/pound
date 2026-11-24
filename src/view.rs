@@ -59,6 +59,13 @@ fn shell_html(settings: &Settings, fonts: &[String], loading: bool) -> String {
     );
     let quoted: Vec<String> = fonts.iter().map(|n| json_str(n)).collect();
     let fonts_injected = format!("window.poundFonts = [{}];", quoted.join(", "));
+    // Both strings are spliced into a <script> element: a "</script" inside
+    // a font family name would end the element early and turn the rest into
+    // markup. "<\/" is the same string to JavaScript (a valid escape) and
+    // nothing special to the HTML parser.
+    let safe_in_script = |s: String| s.replace("</", "<\\/");
+    let settings_injected = safe_in_script(settings_injected);
+    let fonts_injected = safe_in_script(fonts_injected);
     let body_injected = if loading {
         r#"<body data-mode="markdown" class="no-doc loading">"#
     } else {
@@ -118,6 +125,12 @@ enum RenderEvent {
         gen: u64,
         html: String,
     },
+    /// A re-render panicked: the worker lived on, the preview keeps its
+    /// last paint, and the banner says so.
+    Failed {
+        gen: u64,
+        message: String,
+    },
 }
 
 /// From a batch of already-queued jobs, keep only what still matters:
@@ -158,7 +171,18 @@ fn spawn_render_worker(rx: std::sync::mpsc::Receiver<Job>, proxy: EventLoopProxy
             for job in collapse(batch) {
                 match job {
                     Job::Open { gen, path, reload } => {
-                        let result = Document::load(&path);
+                        // A panicking job must not kill the worker: its death
+                        // would strand every later open and edit silently
+                        // (the senders' errors are ignored by design) — an
+                        // app that never renders anything again, with no
+                        // error. Caught and reported like any failure.
+                        let result = std::panic::catch_unwind(|| Document::load(&path))
+                            .unwrap_or_else(|_| {
+                                Err(format!(
+                                    "the renderer crashed while loading {}",
+                                    path.display()
+                                ))
+                            });
                         let _ = proxy.send_event(RenderEvent::Opened {
                             gen,
                             reload,
@@ -166,8 +190,20 @@ fn spawn_render_worker(rx: std::sync::mpsc::Receiver<Job>, proxy: EventLoopProxy
                         });
                     }
                     Job::Render { gen, source, spec } => {
-                        let html = render_source(&source, spec.file_type, &spec.base_dir);
-                        let _ = proxy.send_event(RenderEvent::Rendered { gen, html });
+                        let rendered = std::panic::catch_unwind(|| {
+                            render_source(&source, spec.file_type, &spec.base_dir)
+                        });
+                        let event = match rendered {
+                            Ok(html) => RenderEvent::Rendered { gen, html },
+                            Err(_) => RenderEvent::Failed {
+                                gen,
+                                message: format!(
+                                    "the renderer crashed on this {} — the preview keeps the last good render",
+                                    spec.file_type.label()
+                                ),
+                            },
+                        };
+                        let _ = proxy.send_event(event);
                     }
                 }
             }
@@ -370,7 +406,7 @@ pub fn run(file: Option<PathBuf>) {
                 Ok(child) => {
                     *ipc_installer.lock().unwrap() = Some(update::InstallerRun::default());
                     let slot = Arc::clone(&ipc_installer);
-                    std::thread::spawn(move || update::read_installer_output(child, &slot));
+                    std::thread::spawn(move || update::read_installer_output(child, slot));
                     ipc_update_ui.set(true);
                     true
                 }
@@ -527,7 +563,11 @@ pub fn run(file: Option<PathBuf>) {
                         // A local-file target: open it in a new Pound window,
                         // VSCode-style — a missing file shows its own error
                         // banner there instead of trapping this window.
-                        if let Some(path) = ipc_presenter.borrow().link_target(&href) {
+                        // Bound on its own line: inside an `if let` head the
+                        // borrow would live through the whole body (edition
+                        // 2021), and the error path's borrow_mut would panic.
+                        let target = ipc_presenter.borrow().link_target(&href);
+                        if let Some(path) = target {
                             // A detached child: dropping the handle does not
                             // kill the process, so the window outlives us.
                             let spawned = std::env::current_exe()
@@ -539,6 +579,12 @@ pub fn run(file: Option<PathBuf>) {
                                 ));
                                 ipc_status.set(true);
                             }
+                        } else {
+                            // Not a file target after all (ftp:, about:, data:…):
+                            // refuse with the explanatory banner, exactly as
+                            // the navigation handler's safety net would.
+                            ipc_presenter.borrow_mut().refuse_link(&href);
+                            ipc_status.set(true);
                         }
                     }
                     // Anchors scroll in the shell; pound:// controls still
@@ -687,6 +733,17 @@ pub fn run(file: Option<PathBuf>) {
                     preview.set(true);
                 }
             }
+            Event::UserEvent(RenderEvent::Failed {
+                gen: job_gen,
+                message,
+            }) => {
+                // The last good render stays on screen; the banner explains
+                // why the preview stopped following the buffer.
+                if job_gen == gen.get() {
+                    shared.borrow_mut().fail(message);
+                    status_only.set(true);
+                }
+            }
 
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
@@ -775,8 +832,8 @@ pub fn run(file: Option<PathBuf>) {
                     eval_script(&webview, "pound.setUpdating();".to_owned());
                 }
                 if update_ui_active {
-                    let guard = installer.lock().unwrap();
-                    if let Some(run) = guard.as_ref() {
+                    let mut guard = installer.lock().unwrap();
+                    if let Some(run) = guard.as_mut() {
                         if run.lines.len() > update_lines_shown {
                             update_lines_shown = run.lines.len();
                             let line = run.lines.last().cloned().unwrap_or_default();
@@ -786,10 +843,37 @@ pub fn run(file: Option<PathBuf>) {
                             );
                         }
                         if run.finished {
-                            // The installer completed but did not close us
-                            // (e.g. a portable exe elsewhere): exit so the
-                            // freshly installed/relaunched Pound takes over.
-                            *control_flow = ControlFlow::Exit;
+                            if run.success {
+                                // The installer completed but did not close us
+                                // (e.g. a portable exe elsewhere): exit so the
+                                // freshly installed/relaunched Pound takes over.
+                                *control_flow = ControlFlow::Exit;
+                            } else {
+                                // It failed before the replace step (download,
+                                // zip, register): this Pound is still the one
+                                // running, so keep it running — unlock the
+                                // editor, retire the run (CloseRequested must
+                                // prompt again) and say why in the banner.
+                                // Acting on `finished` alone once closed the
+                                // app on every failed update.
+                                let detail: String = run
+                                    .errors
+                                    .iter()
+                                    .chain(&run.lines)
+                                    .find(|line| !line.trim().is_empty())
+                                    .map_or("no output", |line| line.trim())
+                                    .chars()
+                                    .take(160)
+                                    .collect();
+                                shared.borrow_mut().fail(format!(
+                                    "the update did not complete — the installer stopped at \"{detail}\"; v{} is still running",
+                                    env!("CARGO_PKG_VERSION")
+                                ));
+                                *guard = None;
+                                update_ui_active = false;
+                                status_only.set(true);
+                                eval_script(&webview, "pound.setUpdateFailed();".to_owned());
+                            }
                         }
                     }
                 }
@@ -873,12 +957,9 @@ fn handle_navigation(
     match link_action(url, initial_load) {
         LinkAction::Internal => {
             if let Some(command) = url.strip_prefix("pound://") {
-                match command.split(['?', '#']).next().unwrap_or("") {
-                    "dismiss-error" => {
-                        presenter.dismiss_error();
-                        status.set(true);
-                    }
-                    _ => {}
+                if command.split(['?', '#']).next().unwrap_or("") == "dismiss-error" {
+                    presenter.dismiss_error();
+                    status.set(true);
                 }
             }
             false

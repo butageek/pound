@@ -1,22 +1,25 @@
 Pound - quick start
 ===================
 
-Pound is a markdown reader for Windows. Double-click any .md file to read
-it rendered; press Ctrl+U (or click "Source") to see the raw markdown in a
-side-by-side pane. No admin rights needed anywhere.
+Pound is a file viewer for Windows. Markdown renders with a live-editable
+source pane beside it (Ctrl+U toggles it); CSV/TSV files open as sortable
+tables; TOML/YAML/JSON and any other text file open in the editor. No admin
+rights needed anywhere.
 
 1. RUN THE INSTALLER (recommended)
 
-   Open PowerShell and paste (irm + iex on one line, then the installer
-   line — piping scripts into iex breaks on Windows PowerShell 5.1 when
-   they declare parameters, so run the downloaded file instead):
+   In PowerShell 7 (pwsh), paste - it installs Pound to
+   %LOCALAPPDATA%\Pound, registers it with Windows and adds it to your
+   PATH:
 
-     irm https://raw.githubusercontent.com/butageek/pound/main/tools/install.ps1 -OutFile $env:TEMP\pound-install.ps1
-     powershell -ExecutionPolicy Bypass -File $env:TEMP\pound-install.ps1
+     irm https://raw.githubusercontent.com/butageek/pound/main/tools/install.ps1 | iex
 
-   This installs Pound, registers it with Windows and adds it to your PATH.
+   (On Windows PowerShell 5.1 - the built-in powershell.exe - "iex" cannot
+   run a script with parameters; download it first instead:
+   powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/install.ps1 -OutFile $env:TEMP\pound-install.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\pound-install.ps1")
+
    To also make it the default app for .md files, download and run it with
-   -SetDefault instead:
+   -SetDefault instead (iex takes no parameters):
 
      irm https://raw.githubusercontent.com/butageek/pound/main/tools/install.ps1 -OutFile install.ps1
      powershell -ExecutionPolicy Bypass -File .\install.ps1 -SetDefault

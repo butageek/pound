@@ -526,8 +526,8 @@
     <div id="content-wrap">
       <div id="welcome">
         <h1>Pound</h1>
-        <div>A tiny markdown reader.</div>
-        <div>Drop a <code>.md</code>, <code>.csv</code> or any text file anywhere in this window,</div>
+        <div>A lightweight file viewer.</div>
+        <div>Drop a <code>.md</code>, <code>.csv</code>, <code>.toml</code>, <code>.json</code> or any text file anywhere in this window,</div>
         <div>or run <code>pound path/to/file.md</code> from a terminal.</div>
       </div>
       <article id="content"></article>
@@ -723,7 +723,9 @@
       document.getElementById('update-version').textContent = version;
       document.getElementById('update-notes').href =
         'https://github.com/butageek/pound/releases/tag/' + encodeURIComponent(version);
-      document.getElementById('update').style.display = 'block';
+      // The toast is cached at load: a document heading whose slug is
+      // "update" sits earlier in the tree and would win getElementById.
+      updateToast.style.display = 'block';
     },
     // The installer is running: lock the editor (the file on disk is about
     // to be replaced) and mirror the installer's progress lines.
@@ -736,6 +738,15 @@
     setUpdatingProgress(line) {
       document.getElementById('update-progress-line').textContent =
         line.replace(/^===>\s*/, '');
+    },
+    // The installer failed before replacing anything: this version keeps
+    // running. Undo setUpdating's lock, retire the toast, and let the
+    // banner (pound.setError, pushed right after) carry the reason — the
+    // Save button follows the host's next status push.
+    setUpdateFailed() {
+      sourceEl.disabled = false;
+      document.getElementById('update-progress').style.display = 'none';
+      updateToast.style.display = 'none';
     },
     // Host-side clipboard text (the editor's Paste action): insert at
     // the caret like typing, so it lands on the native undo stack and
@@ -768,10 +779,16 @@
   function addCopyButtons() {
     document.querySelectorAll('#content pre').forEach(pre => {
       if (pre.querySelector('.copy-btn')) return;
+      // Capture the code BEFORE the button joins the pre: innerText of the
+      // whole element is its rendered text, and a positioned, transparent
+      // child still counts — copying after appending shipped the word
+      // "Copy" along with the code. textContent (no forced layout, per
+      // push) is the same text for a <pre>.
+      const text = pre.textContent;
       const btn = document.createElement('button');
       btn.type = 'button'; btn.className = 'copy-btn'; btn.textContent = 'Copy';
       btn.onclick = () => {
-        copyText(pre.innerText).then(() => {
+        copyText(text).then(() => {
           btn.textContent = 'Copied';
           setTimeout(() => (btn.textContent = 'Copy'), 1200);
         });
@@ -896,7 +913,10 @@
   const saveBtn = document.getElementById('save');
   const setSaveEnabled = on => (saveBtn.disabled = !on);
   const hostSend = msg => { if (window.ipc) window.ipc.postMessage(msg); };
-  saveBtn.onclick = () => hostSend('save');
+  // flushEdit (defined with the editor below) delivers any debounced edit
+  // first: the host must save the buffer as it is now, not as it was
+  // 250 ms ago.
+  saveBtn.onclick = () => { flushEdit(); hostSend('save'); };
 
   // The code-mode highlight overlay behind the (transparent-text)
   // textarea. With `null` it mirrors the plain buffer immediately —
@@ -946,7 +966,7 @@
   // hidden in the other modes and disabled with no document open).
   const exportBtn = document.getElementById('export');
   const setExportEnabled = on => (exportBtn.disabled = !on);
-  exportBtn.onclick = () => hostSend('export-html');
+  exportBtn.onclick = () => { flushEdit(); hostSend('export-html'); };
 
   // The success toast the host raises via pound.setExported. A new
   // document retires it (it would point at the previous file).
@@ -963,28 +983,54 @@
   // (Rust owns rendering + sanitization; the result comes back through
   // pound.setRendered, which never touches this textarea).
   let editTimer = 0;
+  let editPending = false; // a debounced edit has not reached the host yet
+  const postEdit = () => {
+    editPending = false;
+    // A paste can push the document over (or back under) the line
+    // cap — keep the wrap fallback in step with the buffer.
+    syncSourceWrap(sourceEl.value);
+    hostSend('edit\n' + sourceEl.value);
+  };
+  // Deliver a pending edit now, before anything that must act on the
+  // newest buffer: Save, Export, the close prompt's answers and Update
+  // post after it on the same ordered channel, so the host never saves,
+  // exports, discards or updates the buffer as it was 250 ms ago (Ctrl+S
+  // used to write the file without the last keystrokes, then the late
+  // edit re-dirtied it). Returns whether an edit was posted.
+  const flushEdit = () => {
+    clearTimeout(editTimer);
+    editTimer = 0;
+    if (!editPending) return false;
+    postEdit();
+    return true;
+  };
   sourceEl.addEventListener('input', () => {
     // Keep the overlay honest while the debounced round-trip runs.
     if (document.body.dataset.mode === 'code') setCodeHighlight(null);
     clearTimeout(editTimer);
-    editTimer = setTimeout(() => {
-      // A paste can push the document over (or back under) the line
-      // cap — keep the wrap fallback in step with the buffer.
-      syncSourceWrap(sourceEl.value);
-      hostSend('edit\n' + sourceEl.value);
-    }, 250);
+    // Leading edge on the clean→dirty transition only: the host must learn
+    // at once that the buffer is unsaved, or a window closed within the
+    // debounce window would exit without a prompt (its dirty check still
+    // says clean). The rest of the burst rides the trailing edge as before.
+    if (!editPending && saveBtn.disabled) postEdit();
+    editPending = true;
+    editTimer = setTimeout(postEdit, 250);
   });
 
   addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
       e.preventDefault();
-      if (!saveBtn.disabled) hostSend('save');
+      // A pending edit makes the save meaningful even while the button
+      // still shows the host's older, clean state.
+      const posted = flushEdit();
+      if (!saveBtn.disabled || posted) hostSend('save');
     }
   });
 
   addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e') {
       e.preventDefault();
+      flushEdit();
       if (!exportBtn.disabled) hostSend('export-html');
     }
   });
@@ -1314,6 +1360,9 @@
   const closePrompt = document.getElementById('close-prompt');
   const hideClosePrompt = () => (closePrompt.style.display = 'none');
   const answerClosePrompt = msg => {
+    // The newest buffer first: "Save" must save what is on screen, and
+    // even "Don't save" should discard everything that was typed.
+    flushEdit();
     hideClosePrompt();
     hostSend(msg);
   };
@@ -1323,15 +1372,23 @@
   addEventListener('keydown', e => {
     if (closePrompt.style.display !== 'flex') return;
     if (e.key === 'Escape') { e.preventDefault(); answerClosePrompt('cancel-exit'); }
-    if (e.key === 'Enter') { e.preventDefault(); answerClosePrompt('save-and-exit'); }
+    // Enter on a focused button is that button's own click (Tab to
+    // "Don't save" or "Cancel" and press Enter must do exactly that).
+    // Only a bare Enter — nothing focused — takes the default, Save.
+    if (e.key === 'Enter' && e.target.tagName !== 'BUTTON') {
+      e.preventDefault();
+      answerClosePrompt('save-and-exit');
+    }
   });
 
   // ---- update toast ---------------------------------------------------
   // "Update" keeps the toast visible: setUpdating (host-driven) swaps it
-  // to progress mode while the installer runs.
-  document.getElementById('update-now').onclick = () => hostSend('update');
+  // to progress mode while the installer runs. The host's dirty check
+  // decides whether to prompt first — it must see a just-typed buffer.
+  const updateToast = document.getElementById('update');
+  document.getElementById('update-now').onclick = () => { flushEdit(); hostSend('update'); };
   document.getElementById('update-dismiss').onclick = () =>
-    (document.getElementById('update').style.display = 'none');
+    (updateToast.style.display = 'none');
 
   // Tell the host this shell has parsed and pound.setContent is callable:
   // the initial content push races the page load, so the host re-sends on

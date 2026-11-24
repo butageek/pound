@@ -90,7 +90,15 @@ the editor (a text file is its own source). Architecture is strict MVP
   `csv-sort\n<column>`, `Model::sort_csv` re-renders the stored grid
   under the new sort (same column toggles direction) and the usual
   preview push delivers it; numeric columns (every non-empty value
-  parses) sort numerically, empties sink. **Column widths** are pure
+  parses) sort numerically through `f64::total_cmp` — never
+  `partial_cmp().unwrap_or(Equal)`: Rust parses `NaN` as a number, NaN
+  equals everything under partial_cmp, and `sort_by` panics on a
+  comparator that is not a total order (it runs on the UI thread inside
+  WebView2's callback, i.e. a process abort; `compare_cells` is
+  property-tested for antisymmetry/transitivity because std's panic is
+  only best-effort detected). The sort orders a permutation of row
+  indices, not a clone of the grid — only `MAX_ROWS` rows ever render.
+  **Column widths** are pure
   layout and live in the shell: each column opens at a content-fit
   default (the widest cell, canvas-measured in the table's fonts,
   clamped to 40–400 px; leftover pane width goes to uncapped columns
@@ -187,16 +195,26 @@ the editor (a text file is its own source). Architecture is strict MVP
   against the document's directory by `Presenter::link_target` with
   percent-decoding) → a **new Pound window** (`current_exe` spawn),
   which reports a missing file in its own error banner; anchors scroll
-  in-page. The navigation handler remains as a safety net: only the
-  initial load and same-document `about:blank#…` anchors stay;
-  everything else is refused. ammonia allows the `file:` scheme on
-  hrefs for this path.
+  in-page (headings carry slug ids — see the ammonia note). Any other
+  scheme (`ftp:`, `about:`, `data:`…) is *not* a file:
+  `presenter::scheme_of` (drive letters excluded — `C:\x` is a path)
+  makes `link_target` return `None`, and the view refuses with the
+  banner instead of opening a window on a garbage path. The navigation
+  handler remains as a safety net: only the initial load and
+  same-document `about:blank#…` anchors stay; everything else is
+  refused. ammonia allows the `file:` scheme on hrefs for this path.
+- The render worker wraps each job in `catch_unwind` — a panicking
+  render must not kill the thread, whose death would strand every later
+  open and edit silently (the senders' errors are ignored by design):
+  an `Opened` failure becomes the usual `Err`, a `Render` panic becomes
+  `RenderEvent::Failed` (the preview keeps its last paint, the banner
+  says so).
 - Drag & drop only reaches the host when a wry `with_drag_drop_handler`
   is registered — that's what makes wry set `AllowExternalDrop(false)`;
   without it the WebView2 page silently swallows drops (tao's
   `DroppedFile` never fires, the webview covers the whole client area).
   The handler picks a winner via `presenter.pick_dropped` (markdown,
-  then CSV, else the last path) and loads it on the render worker
+  then CSV, then a highlighted config file, else the last path) and loads it on the render worker
   (`request_open`; `presenter.open_dropped` is the synchronous twin
   for tests); the previous document stays on screen until the new one
   lands. The return value is ignored on Windows.
@@ -245,7 +263,16 @@ the editor (a text file is its own source). Architecture is strict MVP
   Full `pound.setContent(...)` (textarea rewrite + caret parked at top)
   runs only for real document loads. `save` posts over the same channel;
   `model.save` preserves the file's CRLF/LF style (the DOM normalizes the
-  buffer to LF).
+  buffer to LF). **The debounce must be flushed before anything that
+  acts on the buffer**: the shell's `flushEdit` posts a pending `edit`
+  first from Save (`Ctrl+S`, the button), Export, the close prompt's
+  answers and Update, which then post on the same FIFO channel — Ctrl+S
+  once wrote the file *without the last keystrokes* and the late edit
+  re-dirtied it. The clean→dirty transition posts on the leading edge
+  too, so a window closed within the 250 ms window still gets the
+  prompt (the host's dirty check would otherwise still say clean). The
+  close prompt's Enter is per-button: Tab to *Don't save* + Enter does
+  exactly that; only a bare Enter takes the default, Save.
 - **Export HTML** (markdown only): the top bar's Export button
   (`Ctrl+E`) posts `export-html`; `Model::export_html` renders the
   *live buffer* (unsaved edits included — an export is what you see)
@@ -275,7 +302,13 @@ the editor (a text file is its own source). Architecture is strict MVP
 - Disk-conflict policy: unsaved edits pause auto-reload. The status bar
   shows `edited`, plus `changed on disk` when the file was modified
   externally (saving resolves it, last writer wins); a same-content mtime
-  touch never reloads. The window title prefixes `*` while unsaved.
+  touch never reloads. The window title prefixes `*` while unsaved. A
+  reload that *fails* (binary file, sharing violation while another
+  program writes) records the mtime it acted on (`failed_mtime`): the
+  poll skips that state instead of retrying every 800 ms — the banner
+  used to re-appear right after each Dismiss, for as long as the file
+  stayed unreadable. `Document::load` stats before it reads, so a write
+  landing in between carries a newer mtime than the recorded one.
 - Themes: a **Settings** page (the top bar's leftmost button) with the
   Zed-style model:
   the mode (Auto / Light / Dark) plus a palette per mode — light:
@@ -349,7 +382,19 @@ the editor (a text file is its own source). Architecture is strict MVP
 - **ammonia sanitizes all HTML** — markdown files can embed raw HTML and
   file content must never execute (scripts/handlers/styling stripped).
   `poundimg`/`data` URL schemes must be in ammonia's allowlist or image
-  srcs silently vanish.
+  srcs silently vanish. Two attribute values are filtered
+  (`attribute_filter`): `input type` must be `checkbox` (a file must not
+  render a file picker or a fake text box), and `id` — allowed on
+  headings only — must be slug-shaped, because **headings carry anchor
+  ids**: `slug_headings` gives every heading a GitHub-style slug of its
+  text (`What's new?` → `whats-new`, repeats `-1`, `-2`); pulldown emits
+  no ids, so without it `[Intro](#intro)` had nothing to scroll to (the
+  shell's anchor path was dead). The shell caches its `update` toast
+  element at load for the same reason: a document heading that slugs to
+  `update` sits earlier in the tree and would win `getElementById`.
+  `shell_html` splices `json_str` output inside a `<script>` element, so
+  it rewrites `</` as `<\/` there (same string to JS, inert to the
+  HTML parser) — a `</script>` in a font name must not end the element.
 - Shell HTML/CSS/JS lives in `src/shell.html`, embedded via `include_str!`
   (`SHELL_HTML` in `view.rs`) — a real file, so editors and formatters
   treat it as HTML. To preview/verify it in a browser: `cargo test
@@ -365,7 +410,7 @@ the editor (a text file is its own source). Architecture is strict MVP
 ```bash
 cargo test                                      # unit tests (headless)
 cargo fmt --all && cargo clippy --all-targets   # keep CI green
-cargo check --target x86_64-pc-windows-msvc     # type-check Windows code
+cargo clippy --target x86_64-pc-windows-msvc --all-targets -- -D warnings  # lint Windows code (CI runs this)
 ./scripts/package.sh                            # build dist/pound-<ver>-win64.zip (MSVC host)
 powershell -ExecutionPolicy Bypass -File tools/install.ps1 -SetDefault  # on Windows
 ```
@@ -397,7 +442,7 @@ powershell -ExecutionPolicy Bypass -File tools/install.ps1 -SetDefault  # on Win
 
 Everyday pushes to main are preservation-only (no CI). Pull requests and
 manual dispatch run `.github/workflows/ci.yml` (fmt, clippy, tests,
-Windows cross-check).
+Windows-target clippy).
 
 ## In-app updates
 
@@ -417,9 +462,30 @@ Windows cross-check).
   `cancel-exit` and clears the pending update). `-OpenPath` reopens the
   previously open file after the relaunch.
 - GOTCHA: both the check and the installer are silent PowerShell spawns;
-  a failed upgrade just leaves the old version running. While updating,
-  the editor is locked and CloseRequested exits without prompting (the
-  buffer was already saved or discarded).
+  a failed upgrade leaves the old version running — the view acts on
+  `run.finished` **and** `run.success`: a failure (download, zip,
+  register — anything before the replace step) keeps the app open,
+  unlocks the editor (`pound.setUpdateFailed`), clears the run so
+  CloseRequested prompts again, and puts the installer's first stderr
+  line in the banner (stderr is piped and drained on its own thread — a
+  full pipe would deadlock the child). Acting on `finished` alone once
+  closed the app on every failed update. While updating, the editor is
+  locked and CloseRequested exits without prompting (the buffer was
+  already saved or discarded).
+- GOTCHA (RefCell borrows, edition 2021 `if let`): in
+  `if let Some(x) = cell.borrow().f() { … }` the `Ref` temporary lives
+  through the whole body, so a `borrow_mut()` on an inner error path
+  panics (`BorrowMutError`) — the new-window spawn's failure path did
+  exactly that, turning a banner into a process abort. Bind the
+  borrow's result on its own line first (the `Link`/`Refuse` arm in
+  `view.rs` shows the shape).
+- GOTCHA (PS 5.1): `irm … | iex` cannot run a script with a `param()`
+  block, so the README's short form needs PowerShell 7 and carries the
+  5.1 file form as a fallback (the maintainer runs `pwsh`). The in-app
+  spawn keeps the file form regardless: `update::installer_script`
+  spawns `powershell.exe` (5.1 — the one shell every Windows machine
+  has), never `pwsh`, and `-Relaunch`/`-OpenPath` need the file form
+  anyway (`iex` takes no parameters). Do not "simplify" it to the pipe.
 
 ## Windows integration notes (context for `register.rs`)
 
@@ -440,10 +506,31 @@ Windows cross-check).
   is hash-protected by Windows — no third-party app may set it silently;
   if the "choose an app" dialog still appears, the user picks Pound once
   with "Always". Platform restriction, not a bug.
-- `install.ps1` copies the exe to `%LOCALAPPDATA%\Pound`, adds a Start-menu
+- `tools/install.ps1` (README one-liner `irm … | iex` for PowerShell 7, the
+  5.1 file form in a collapsed block below it) copies the exe to
+  `%LOCALAPPDATA%\Pound`, adds a Start-menu
   shortcut + user PATH, and calls `pound register`. The same command
-  upgrades: it closes a running Pound first (Windows locks a running exe)
-  and re-registers idempotently.
+  upgrades: it asks a running Pound to close first (Windows locks a
+  running exe) and re-registers idempotently. It **refuses to continue
+  if Pound stays open** after the 5 s grace period — that Pound is
+  almost certainly showing the unsaved-changes prompt, and the old
+  `Stop-Process -Force` silently discarded the user's edits;
+  `-Force` opts into terminating. The in-app updater never needs it (it
+  saves or discards first). Download zips and extraction dirs are
+  removed once the exe is in place.
+- GOTCHA (PATH): the installer and uninstaller read and write the user
+  PATH through `Microsoft.Win32.Registry` with
+  `DoNotExpandEnvironmentNames` / the existing `RegistryValueKind`
+  (`Get-UserPath`/`Set-UserPath`, which also broadcast
+  `WM_SETTINGCHANGE`). The `[Environment]::Get/SetEnvironmentVariable`
+  pair they replaced returns the *expanded* value and writes `REG_SZ`,
+  silently downgrading a `REG_EXPAND_SZ` PATH and freezing every
+  `%VAR%` entry in it (the setx pitfall).
+- `tools/uninstall.ps1` deletes only Pound's own files from the install
+  dir (`pound.exe` + helper DLLs) and removes the folder itself only
+  when nothing else is left — `Remove-Item -Recurse` on a user-chosen
+  `-InstallDir` (say `C:\Tools`) would have wiped it. `pound unregister`
+  also removes `HKCU\Software\Pound`, i.e. the theme/font/size settings.
 - The binary is built with the GUI subsystem (`windows_subsystem = "windows"`);
   CLI subcommands attach to the parent console for output (unless stdout is
   already a console/pipe/file, so redirection keeps working).

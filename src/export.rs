@@ -244,7 +244,7 @@ mod tests {
         assert!(html.starts_with("<!doctype html>"));
         assert!(html.contains("<title>notes</title>"), "{html}");
         assert!(html.contains("<meta charset=\"utf-8\">"), "{html}");
-        assert!(html.contains("<h1>Title</h1>"), "{html}");
+        assert!(html.contains("<h1 id=\"title\">Title</h1>"), "{html}");
         assert!(html.contains("<strong>bold</strong>"), "{html}");
         // Both palettes ship: the file follows the system preference.
         assert!(html.contains("#fdf6e3"), "light palette: {html}");

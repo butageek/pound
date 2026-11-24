@@ -4,11 +4,14 @@
 //! HTTP/zip dependency tree: the check is one `Invoke-RestMethod` against
 //! the GitHub API, and "Update & restart" simply runs the official
 //! `tools/install.ps1` (the documented one-liner) with `-Relaunch` — the
-//! same battle-tested path a manual upgrade takes. Failures are silent:
-//! a check that cannot reach the network just never shows a notice.
+//! same battle-tested path a manual upgrade takes. A check that cannot
+//! reach the network just never shows a notice; an installer that fails
+//! keeps the old version running and shows why (the banner).
 
 #[cfg(windows)] // Path is used only by the Windows installer spawn below
 use std::path::Path;
+#[cfg(windows)] // InstallerSlot is shared with the view's event loop (read_installer_output)
+use std::sync::Arc;
 use std::sync::Mutex;
 
 /// An answer to the shell's close prompt ("unsaved changes").
@@ -130,6 +133,8 @@ fn installer_script(open_path: Option<&Path>) -> String {
 pub struct InstallerRun {
     /// The installer's own progress lines (Write-Step output).
     pub lines: Vec<String>,
+    /// Its stderr (PowerShell error text) — why a failed run failed.
+    pub errors: Vec<String>,
     pub finished: bool,
     pub success: bool,
 }
@@ -153,6 +158,7 @@ pub fn spawn_installer(open_path: Option<&Path>) -> std::io::Result<std::process
     std::process::Command::new("powershell")
         .args([
             "-NoProfile",
+            "-NonInteractive",
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
@@ -160,14 +166,32 @@ pub fn spawn_installer(open_path: Option<&Path>) -> std::io::Result<std::process
         ])
         .creation_flags(CREATE_NO_WINDOW)
         .stdout(Stdio::piped())
+        // Piped too: PowerShell's error text is the only account of *why*
+        // an installer failed (a download 404, a thrown step), and the
+        // banner on a failed update quotes it.
+        .stderr(Stdio::piped())
         .spawn()
 }
 
-/// Stream the installer's progress lines into `run` until it exits.
+/// Stream the installer's progress lines into `run` until it exits, then
+/// record the outcome. stdout feeds the toast; stderr is drained on its
+/// own thread (a full pipe would deadlock the child) and kept for the
+/// failure message. The run lands as `finished`, `success` saying whether
+/// the installer exited 0 — a failure means it never reached the replace
+/// step, so this Pound is still the one running.
 #[cfg(windows)]
-pub fn read_installer_output(mut child: std::process::Child, run: &InstallerSlot) {
+pub fn read_installer_output(mut child: std::process::Child, run: Arc<InstallerSlot>) {
     use std::io::BufRead;
 
+    let stderr = child.stderr.take().map(|stderr| {
+        std::thread::spawn(move || {
+            std::io::BufReader::new(stderr)
+                .lines()
+                .map_while(Result::ok)
+                .filter(|line| !line.trim().is_empty())
+                .collect::<Vec<String>>()
+        })
+    });
     if let Some(stdout) = child.stdout.take() {
         for line in std::io::BufReader::new(stdout)
             .lines()
@@ -179,9 +203,13 @@ pub fn read_installer_output(mut child: std::process::Child, run: &InstallerSlot
         }
     }
     let success = child.wait().map(|status| status.success()).unwrap_or(false);
+    let errors = stderr
+        .and_then(|thread| thread.join().ok())
+        .unwrap_or_default();
     if let Some(state) = run.lock().unwrap().as_mut() {
         state.finished = true;
         state.success = success;
+        state.errors = errors;
     }
 }
 

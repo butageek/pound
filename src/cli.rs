@@ -20,13 +20,14 @@ pub enum Command {
 
 pub fn usage() -> String {
     format!(
-        "pound {} — a small markdown reader
+        "pound {} — a lightweight file viewer for Windows
 
 USAGE:
     pound [FILE]              open FILE (or start empty)
     pound register [--default]
                               register Pound as an app and associate it with the
-                              files it opens (.md, .csv/.tsv, plain text)
+                              files it opens (.md, .csv/.tsv, .toml/.yaml/.json,
+                              plain text)
                               --default also makes Pound the default .md handler
     pound unregister          remove all registry entries
     pound --help | --version

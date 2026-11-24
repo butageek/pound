@@ -40,7 +40,9 @@ pub struct Sort {
 /// Render delimited text as a sanitized HTML table, plus the file's
 /// shape — `(data rows, columns)` — or `None` when there is not even a
 /// header row. The count is always the whole file's, never the rendered
-/// cap.
+/// cap. Test convenience over `parse_grid` + `grid_to_html`: the app
+/// parses once at load and re-renders the stored grid.
+#[cfg(test)]
 pub fn to_html(source: &str, sort: Option<Sort>) -> (String, Option<(usize, usize)>) {
     grid_to_html(&parse_grid(source), sort)
 }
@@ -68,20 +70,24 @@ pub fn parse_grid(source: &str) -> Vec<Vec<String>> {
 /// shape — `(data rows, columns)`, the whole grid's, never the rendered
 /// cap. Sorting works on a copy: the stored grid is shared state.
 pub fn grid_to_html(rows: &[Vec<String>], sort: Option<Sort>) -> (String, Option<(usize, usize)>) {
-    let mut rows = rows.to_vec();
-    // The shape exists once there is at least a header row.
-    let shape = (!rows.is_empty()).then(|| {
-        (
-            rows.len().saturating_sub(1),
-            rows.iter().map(|r| r.len()).max().unwrap_or(0),
-        )
-    });
+    let Some((header, data)) = rows.split_first() else {
+        return (
+            "<div class=\"csv-empty\">This file has no rows.</div>".to_owned(),
+            None,
+        );
+    };
+    // The shape exists once there is at least a header row, and is always
+    // the whole grid's, never the rendered cap.
+    let columns = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    let shape = Some((data.len(), columns));
+    // Sort a permutation of the row indices, not a clone of every cell: a
+    // million-row file used to copy all of itself per header click, while
+    // only MAX_ROWS rows ever render.
+    let mut order: Vec<usize> = (0..data.len()).collect();
     if let Some(sort) = sort {
-        if let Some((_header, data)) = rows.split_first_mut() {
-            sort_rows(data, sort);
-        }
+        sort_rows(data, &mut order, sort);
     }
-    let html = sanitize(&render(&rows, sort));
+    let html = sanitize(&render(header, data, &order, columns, sort));
     (html, shape)
 }
 
@@ -112,30 +118,23 @@ fn sniff_delimiter(source: &str) -> u8 {
         .map_or(b',', |(i, _)| CANDIDATES[i])
 }
 
-/// Sort data rows by `column`: numerically when every non-empty value in
+/// Order data rows by `column`: numerically when every non-empty value in
 /// the column parses as a number, else as text. Stable, so ties keep
-/// file order; empty cells sink regardless of direction.
-fn sort_rows(rows: &mut [Vec<String>], sort: Sort) {
-    let numeric = rows.iter().all(|row| {
+/// file order; empty cells sink regardless of direction. `order` is the
+/// permutation to sort — indices into `data`.
+fn sort_rows(data: &[Vec<String>], order: &mut [usize], sort: Sort) {
+    let numeric = data.iter().all(|row| {
         let value = field(row, sort.column).trim();
         value.is_empty() || value.parse::<f64>().is_ok()
     });
-    rows.sort_by(|a, b| {
-        let (av, bv) = (field(a, sort.column), field(b, sort.column));
+    order.sort_by(|&a, &b| {
+        let (av, bv) = (field(&data[a], sort.column), field(&data[b], sort.column));
         match (av.is_empty(), bv.is_empty()) {
             (true, true) => std::cmp::Ordering::Equal,
             (true, false) => std::cmp::Ordering::Greater,
             (false, true) => std::cmp::Ordering::Less,
             (false, false) => {
-                let ord = if numeric {
-                    av.trim()
-                        .parse::<f64>()
-                        .unwrap_or(f64::NAN)
-                        .partial_cmp(&bv.trim().parse::<f64>().unwrap_or(f64::NAN))
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                } else {
-                    av.cmp(bv)
-                };
+                let ord = compare_cells(av, bv, numeric);
                 if sort.ascending {
                     ord
                 } else {
@@ -146,14 +145,34 @@ fn sort_rows(rows: &mut [Vec<String>], sort: Sort) {
     });
 }
 
+/// Order two non-empty cells of one column: numerically through
+/// [`f64::total_cmp`] when the column is numeric, else as text. Never
+/// `partial_cmp().unwrap_or(Equal)`: Rust parses "NaN" as a number and
+/// NaN compares *equal* to everything under partial_cmp, which is not a
+/// total order — `sort_by` then panics ("does not correctly implement a
+/// total order") on the UI thread, inside WebView2's callback.
+fn compare_cells(a: &str, b: &str, numeric: bool) -> std::cmp::Ordering {
+    if numeric {
+        a.trim()
+            .parse::<f64>()
+            .unwrap_or(f64::NAN)
+            .total_cmp(&b.trim().parse::<f64>().unwrap_or(f64::NAN))
+    } else {
+        a.cmp(b)
+    }
+}
+
 /// Build the (pre-sanitization) table HTML; the shell adds interaction
 /// (sort clicks, column resizing) to the live DOM, so this stays plain.
-fn render(rows: &[Vec<String>], sort: Option<Sort>) -> String {
-    let Some((header, data)) = rows.split_first() else {
-        return "<div class=\"csv-empty\">This file has no rows.</div>".to_owned();
-    };
-    let shown = &data[..data.len().min(MAX_ROWS)];
-    let columns = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+/// `order` lists the data rows in display order (file order unsorted).
+fn render(
+    header: &[String],
+    data: &[Vec<String>],
+    order: &[usize],
+    columns: usize,
+    sort: Option<Sort>,
+) -> String {
+    let shown = &order[..order.len().min(MAX_ROWS)];
     let numeric: Vec<bool> = (0..columns).map(|c| column_is_numeric(data, c)).collect();
 
     let mut html = String::new();
@@ -186,7 +205,8 @@ fn render(rows: &[Vec<String>], sort: Option<Sort>) -> String {
         );
     }
     html.push_str("</tr></thead><tbody>");
-    for row in shown {
+    for &index in shown {
+        let row = &data[index];
         html.push_str("<tr>");
         for c in 0..columns {
             let _ = write!(
@@ -400,6 +420,69 @@ mod tests {
         let kept = html.find("kept").unwrap();
         let last_empty = html.rfind("<td></td>").unwrap();
         assert!(kept < last_empty, "{html}");
+    }
+
+    #[test]
+    fn nan_cells_sort_without_panicking() {
+        // "NaN" parses as f64::NAN; under partial_cmp it equalled everything
+        // (not a total order), so sort_by left columns unsorted or panicked.
+        // The comparator itself must be a total order — checked directly,
+        // since std's panic on a bad comparator is only best-effort detected.
+        let cells = ["1", "2", "10", "-5", "0.5", "NaN", "inf", "-inf", " 7 "];
+        use std::cmp::Ordering::*;
+        for &a in &cells {
+            for &b in &cells {
+                let ab = compare_cells(a, b, true);
+                let ba = compare_cells(b, a, true);
+                assert_eq!(ab, ba.reverse(), "not antisymmetric: {a:?} vs {b:?}");
+                for &c in &cells {
+                    let bc = compare_cells(b, c, true);
+                    let ac = compare_cells(a, c, true);
+                    if ab == Equal && bc == Equal {
+                        assert_eq!(ac, Equal, "equality not transitive: {a:?} {b:?} {c:?}");
+                    }
+                    if ab == Less && bc == Less {
+                        assert_eq!(ac, Less, "order not transitive: {a:?} {b:?} {c:?}");
+                    }
+                }
+            }
+        }
+        // And a real column with NaNs sorts its numbers cleanly, NaNs on
+        // one side (which one depends on NaN's sign bit — not pinned).
+        let mut source = String::from("n,name\n");
+        for i in 0..2000 {
+            let value = if i % 97 == 0 { "NaN" } else { "" };
+            let _ = writeln!(source, "{value},row{i}");
+        }
+        for i in 0..2000 {
+            let _ = writeln!(source, "{i},n{i}");
+        }
+        let (asc, _) = to_html(
+            &source,
+            Some(Sort {
+                column: 0,
+                ascending: true,
+            }),
+        );
+        let positions = (0..2000)
+            .map(|n| {
+                asc.find(&format!("<td class=\"num\">{n}</td>"))
+                    .expect("cell")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            positions.windows(2).all(|w| w[0] < w[1]),
+            "numbers out of order"
+        );
+        let nan_at = asc
+            .match_indices("<td class=\"num\">NaN</td>")
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>();
+        assert!(!nan_at.is_empty());
+        assert!(
+            *nan_at.last().unwrap() < positions[0] || nan_at[0] > *positions.last().unwrap(),
+            "NaNs must all sort to one side"
+        );
     }
 
     #[test]

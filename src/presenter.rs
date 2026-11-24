@@ -93,12 +93,23 @@ impl Presenter {
             LinkAction::Refuse => {} // a file target — resolve it below
             _ => return None,        // web, internal, anchor: no window to open
         }
-        // `file:///C:/x%20y.md` -> `C:/x y.md` (scheme check
-        // case-insensitive; the slice is safe — ASCII prefix).
-        let raw = if href.to_ascii_lowercase().starts_with("file://") {
-            &href[7..]
-        } else {
-            href
+        // Any other scheme (ftp:, about:, data:…) is refused by link_action
+        // too, but is not a file: opening a window on it would just show
+        // "cannot open <garbage path>" there. The caller refuses it with
+        // the banner instead, like a navigation would.
+        let lower = href.to_ascii_lowercase();
+        let raw = match scheme_of(href) {
+            // `file:///C:/x%20y.md` -> `C:/x y.md`; a `file:` URL without
+            // the `//` keeps its rest (ASCII prefixes — the slices are safe).
+            Some(_) if lower.starts_with("file:") => {
+                if lower.starts_with("file://") {
+                    &href[7..]
+                } else {
+                    &href[5..]
+                }
+            }
+            Some(_) => return None,
+            None => href,
         };
         let decoded = crate::markdown::percent_decode(raw).unwrap_or_else(|| raw.to_owned());
         // file:///C:/… leaves a leading slash before the drive letter.
@@ -169,6 +180,9 @@ impl Presenter {
     }
 
     /// Apply an edit from the source pane (drives the live preview).
+    /// Tests only — the GUI goes through [`Presenter::edit_buffer`] and
+    /// the worker.
+    #[cfg(test)]
     pub fn edit_source(&mut self, text: &str) {
         self.model.edit(text);
     }
@@ -188,14 +202,17 @@ impl Presenter {
     }
 
     /// Called on a timer so external edits show up without a restart.
+    /// Tests only — the GUI polls [`Presenter::poll_disk_changed`] and
+    /// adopts via [`Presenter::adopt_reload`].
+    #[cfg(test)]
     pub fn reload_if_changed(&mut self) -> bool {
         self.model.reload_if_changed()
     }
 
-    /// Handle files dragged onto the window: prefer markdown, then CSV,
-    /// else the last thing dropped. Loads synchronously (tests, headless
-    /// callers); the GUI uses [`Presenter::pick_dropped`] and loads the
-    /// pick in the background.
+    /// Handle files dragged onto the window: open [`Presenter::pick_dropped`]'s
+    /// choice. Tests only — it loads synchronously; the GUI loads the pick
+    /// on the worker.
+    #[cfg(test)]
     pub fn open_dropped(&mut self, paths: &[PathBuf]) {
         if let Some(path) = self.pick_dropped(paths) {
             self.open_path(&path);
@@ -204,12 +221,18 @@ impl Presenter {
 
     /// Choose which dropped file to open (the choice half of
     /// [`Presenter::open_dropped`], split so the view can load it off
-    /// the UI thread): prefer markdown, then CSV, else the last thing
-    /// dropped.
+    /// the UI thread): prefer markdown, then CSV, then a highlighted
+    /// config file (TOML/YAML/JSON), else the last thing dropped.
     pub fn pick_dropped(&self, paths: &[PathBuf]) -> Option<PathBuf> {
         let prefer = |kind: FileType| paths.iter().rev().find(|p| FileType::from_path(p) == kind);
         prefer(FileType::Markdown)
             .or_else(|| prefer(FileType::Csv))
+            .or_else(|| {
+                paths
+                    .iter()
+                    .rev()
+                    .find(|p| matches!(FileType::from_path(p), FileType::Code(_)))
+            })
             .or_else(|| paths.last())
             .cloned()
     }
@@ -362,6 +385,18 @@ impl Presenter {
     }
 }
 
+/// The URL scheme of `href`, when it has one: a run of scheme characters
+/// before the first `:` — but a lone letter before the colon is a drive
+/// (`C:\x.md`, `C:/x.md` are paths), never a scheme.
+fn scheme_of(href: &str) -> Option<&str> {
+    let (head, _) = href.split_once(':')?;
+    let is_scheme = head.chars().count() > 1
+        && head
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    is_scheme.then_some(head)
+}
+
 /// Group digits in threes (1234567 -> 1,234,567).
 fn group_digits(n: usize) -> String {
     let digits = n.to_string();
@@ -379,6 +414,20 @@ fn group_digits(n: usize) -> String {
 mod tests {
     use super::*;
     use crate::model::Model;
+
+    #[test]
+    fn scheme_detection_spares_drive_letters() {
+        assert_eq!(scheme_of("ftp://h/f"), Some("ftp"));
+        assert_eq!(scheme_of("about:blank"), Some("about"));
+        assert_eq!(scheme_of("ms-settings:defaultapps"), Some("ms-settings"));
+        // A single letter before the colon is a drive, not a scheme.
+        assert_eq!(scheme_of(r"C:\x.md"), None);
+        assert_eq!(scheme_of("C:/x.md"), None);
+        // Paths without a colon at all, or with one inside a segment.
+        assert_eq!(scheme_of("notes/gone.md"), None);
+        assert_eq!(scheme_of("./a:b"), None);
+        assert_eq!(scheme_of(":nodrive"), None);
+    }
 
     #[test]
     fn links_are_classified_for_navigation() {
@@ -457,6 +506,11 @@ mod tests {
         assert_eq!(presenter.link_target("pound://dismiss-error"), None);
         assert_eq!(presenter.link_target("#anchor"), None);
         assert_eq!(presenter.link_target(""), None);
+        // Nor do the other schemes the navigation rules refuse: not files,
+        // and a window on "ftp:\\host\\f.md" would only show a miss.
+        assert_eq!(presenter.link_target("ftp://example.com/f.md"), None);
+        assert_eq!(presenter.link_target("about:blank/gone.md"), None);
+        assert_eq!(presenter.link_target("data:text/plain,hi"), None);
 
         // With no document open there is nothing to resolve against
         // (absolute paths still open — they carry their own base).
@@ -503,6 +557,15 @@ mod tests {
         assert_eq!(
             chooser.pick_dropped(&[PathBuf::from("/tmp/z.csv"), PathBuf::from("/tmp/b.md")]),
             Some(PathBuf::from("/tmp/b.md"))
+        );
+        // Config files outrank plain text; otherwise the last drop wins.
+        assert_eq!(
+            chooser.pick_dropped(&[PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b.yaml")]),
+            Some(PathBuf::from("/tmp/b.yaml"))
+        );
+        assert_eq!(
+            chooser.pick_dropped(&[PathBuf::from("/tmp/b.txt"), PathBuf::from("/tmp/a.log")]),
+            Some(PathBuf::from("/tmp/a.log"))
         );
         assert_eq!(chooser.pick_dropped(&[]), None);
     }
@@ -650,7 +713,7 @@ mod tests {
         assert_eq!(presenter.document_path(), None);
 
         presenter.open_path(&path);
-        assert!(presenter.html().contains("<h1>"));
+        assert!(presenter.html().contains("<h1 "));
         assert_eq!(presenter.source(), "# hello");
         assert_eq!(presenter.revision(), 1);
         assert!(!presenter.is_dirty());
@@ -734,7 +797,7 @@ mod tests {
         assert!(!presenter.status_text().contains("exported to"));
         assert!(std::fs::read_to_string(path.with_extension("html"))
             .unwrap()
-            .contains("<h1>hi</h1>"));
+            .contains("<h1 id=\"hi\">hi</h1>"));
     }
 
     #[test]

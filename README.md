@@ -22,34 +22,28 @@ text file opens straight into the editor.
 
 ## Install (Windows, no admin rights)
 
-Open PowerShell and paste (downloads the installer and runs it as a
-file — piping scripts into `iex` breaks on Windows PowerShell 5.1 when
-they declare parameters):
-
-```powershell
-powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/install.ps1 -OutFile $env:TEMP\pound-install.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\pound-install.ps1"
-```
-
-Already in **PowerShell 7** (`pwsh`)? The short form works too — but note
-that wrapping it in `powershell -c …` would downgrade it to Windows
-PowerShell 5.1, where it fails:
+Open PowerShell 7 (`pwsh`) and paste — it downloads the latest release
+build from GitHub, copies it to `%LOCALAPPDATA%\Pound`, adds a Start
+Menu shortcut and your user `PATH`, and registers Pound with Windows so
+markdown, data, config and plain-text files (`.md`, `.csv`, `.tsv`,
+`.toml`, `.yaml`, `.json`, `.txt`, `.log`, `.ini` and friends) can open
+with it:
 
 ```powershell
 irm https://raw.githubusercontent.com/butageek/pound/main/tools/install.ps1 | iex
 ```
 
-This downloads the latest release build from GitHub, copies it to
-`%LOCALAPPDATA%\Pound`, adds a Start Menu shortcut and your user `PATH`,
-and registers Pound with Windows so markdown, data, config and
-plain-text files (`.md`, `.csv`, `.tsv`, `.toml`, `.yaml`, `.json`,
-`.txt`, `.log`, `.ini` and friends) can open with it. Then right-click
-any of those files → **Open with** → **Pound** (tick *Always*).
+Then right-click any of those files → **Open with** → **Pound** (tick
+*Always*).
 
 **Upgrades use the exact same command** — it detects an existing install,
-closes a running Pound (gracefully, then forcefully), replaces the exe,
-re-registers, and prints the new version.
+asks a running Pound to close, replaces the exe, re-registers, and prints
+the new version. If Pound stays open (it is showing the unsaved-changes
+prompt), the installer stops and tells you instead of discarding your
+edits; save or discard them and run it again (`-Force` terminates it).
 
-To make Pound the default `.md` handler in the same step:
+To make Pound the default `.md` handler in the same step (`iex` takes no
+parameters, so download the script and run it as a file):
 
 ```powershell
 irm https://raw.githubusercontent.com/butageek/pound/main/tools/install.ps1 -OutFile install.ps1
@@ -59,11 +53,30 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -SetDefault
 Prefer a manual install from the [releases page](https://github.com/butageek/pound/releases)?
 Grab `pound-<version>-win64.zip` and follow the bundled `QUICK-START.txt`.
 
+Uninstall (removes the app, its registration and your Pound settings —
+theme, font, size):
+
+```powershell
+irm https://raw.githubusercontent.com/butageek/pound/main/tools/uninstall.ps1 | iex
+```
+
+<details>
+<summary>Still on Windows PowerShell 5.1 (the built-in <code>powershell.exe</code>)?</summary>
+
+`iex` cannot run a script that declares parameters there, so download it
+and run it as a file instead. Install:
+
+```powershell
+powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/install.ps1 -OutFile $env:TEMP\pound-install.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\pound-install.ps1"
+```
+
 Uninstall:
 
 ```powershell
 powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/uninstall.ps1 -OutFile $env:TEMP\pound-uninstall.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\pound-uninstall.ps1"
 ```
+
+</details>
 
 ## Features
 
@@ -120,13 +133,16 @@ powershell -c "irm https://raw.githubusercontent.com/butageek/pound/main/tools/u
   and line counts for text, rows and columns for tables.
 - Full CommonMark via pulldown-cmark: tables, task lists, strikethrough,
   inline HTML (sanitized), local images (served via a custom `poundimg://`
-  protocol), links open in your browser, code blocks have copy buttons.
+  protocol), links open in your browser, in-page `#anchor` links jump to
+  their heading (GitHub-style ids), code blocks have copy buttons.
 - Auto-reloads when the file changes on disk — keeping your reading
   position.
 - **Self-updates** — checks GitHub on start and offers **Update**, which
   runs the official installer in place with a live progress readout
   (replaces the exe, keeps your registration), relaunches, and reopens
-  the file you had open. The status bar always shows the running version.
+  the file you had open. If the installer fails, Pound stays open on the
+  current version and the banner says why. The status bar always shows
+  the running version.
 - Installs per-user — **no admin rights required**.
 - Registers in the Windows app list (`RegisteredApplications` + ProgId) so
   other apps and the "Open with" / "Default apps" dialogs can find it.
@@ -226,7 +242,7 @@ powershell -ExecutionPolicy Bypass -File tools\install.ps1 -BinaryPath .\target\
 
 Everyday pushes to `main` are preservation-only (no CI), matching this
 repo family's convention. Pull requests and manual dispatch run
-[CI](.github/workflows/ci.yml) (fmt, clippy, tests, Windows cross-check).
+[CI](.github/workflows/ci.yml) (fmt, clippy, tests, Windows-target clippy).
 Pushing a version tag runs [Release](.github/workflows/release.yml):
 
 ```bash

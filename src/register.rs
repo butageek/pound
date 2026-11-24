@@ -24,7 +24,7 @@ use crate::theme::{
     parse_font_size, DarkPalette, LightPalette, Settings, Theme, DEFAULT_FONT_SIZE,
 };
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use winreg::enums::*;
 use winreg::RegKey;
@@ -54,7 +54,7 @@ const PROG_ID: &str = "Pound.md";
 const TABLE_PROG_ID: &str = "Pound.table";
 const TEXT_PROG_ID: &str = "Pound.text";
 const APP_NAME: &str = "Pound";
-const APP_DESCRIPTION: &str = "Viewer for markdown, CSV and text files";
+const APP_DESCRIPTION: &str = "Viewer for markdown, CSV, config and text files";
 
 /// The ProgIds Pound writes, with their Explorer-facing descriptions.
 /// `Pound.md` predates the table views (installed users already carry
@@ -70,19 +70,8 @@ fn exe_path() -> Result<PathBuf, String> {
     std::env::current_exe().map_err(|e| format!("cannot locate the pound executable: {e}"))
 }
 
-fn quoted(path: &PathBuf) -> String {
+fn quoted(path: &Path) -> String {
     format!("\"{}\"", path.display())
-}
-
-/// println!, but tolerant of a closed stdout: installers capture this
-/// output via redirected pipes and sometimes close them early, and a
-/// print panic would fail an otherwise successful registration.
-/// (`writeln!` returns an error instead of panicking; errors ignored.)
-fn say(line: &str) {
-    use std::io::Write;
-    let mut out = std::io::stdout();
-    let _ = writeln!(out, "{line}");
-    let _ = out.flush();
 }
 
 fn ctx(what: &str, e: io::Error) -> String {
@@ -115,13 +104,6 @@ fn notify_assoc_changed() {
     }
 }
 
-/// Attach to the parent console so CLI output is visible when the exe (a
-/// windowed-subsystem binary) is launched from PowerShell/cmd.
-///
-/// Only attaches when we have no usable stdout handle. If stdout is
-/// already a console, pipe, or redirected file (installers capture output
-/// via `Start-Process -RedirectStandardOutput`), we leave it alone so the
-/// redirection keeps working.
 /// Read one setting from `HKCU\Software\Pound`; `None` when missing or
 /// unreadable (callers fall back to defaults).
 fn load_setting(name: &str) -> Option<String> {
@@ -191,6 +173,13 @@ pub fn load_settings() -> Settings {
     }
 }
 
+/// Attach to the parent console so CLI output is visible when the exe (a
+/// windowed-subsystem binary) is launched from PowerShell/cmd.
+///
+/// Only attaches when we have no usable stdout handle. If stdout is
+/// already a console, pipe, or redirected file (installers capture output
+/// via `Start-Process -RedirectStandardOutput`), we leave it alone so the
+/// redirection keeps working.
 pub fn attach_parent_console() {
     use windows_sys::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_UNKNOWN};
     use windows_sys::Win32::System::Console::{
@@ -294,16 +283,16 @@ pub fn register(set_default: bool) -> Result<(), String> {
     notify_assoc_changed();
 
     if set_default {
-        say(&format!(
+        crate::say(&format!(
             "{APP_NAME} registered and set as the handler for .md files."
         ));
-        say("If Windows still asks which app to use, confirm once with \"Always\" or");
-        say("run:  start ms-settings:defaultapps");
+        crate::say("If Windows still asks which app to use, confirm once with \"Always\" or");
+        crate::say("run:  start ms-settings:defaultapps");
     } else {
-        say(&format!(
+        crate::say(&format!(
             "{APP_NAME} registered in the app list for markdown, data and text files;"
         ));
-        say("use \"Open with > Choose another app\" to pick it for any of them.");
+        crate::say("use \"Open with > Choose another app\" to pick it for any of them.");
     }
     Ok(())
 }
@@ -349,7 +338,7 @@ pub fn unregister() -> Result<(), String> {
 
     for (ext, prog_id) in ASSOCIATIONS {
         if let Ok(exts) = hkcu.open_subkey_with_flags(
-            &format!(
+            format!(
                 "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\{ext}\\OpenWithProgids"
             ),
             KEY_SET_VALUE,
@@ -359,7 +348,7 @@ pub fn unregister() -> Result<(), String> {
     }
 
     notify_assoc_changed();
-    say(&format!("{APP_NAME} unregistered."));
+    crate::say(&format!("{APP_NAME} unregistered."));
     Ok(())
 }
 

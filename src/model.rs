@@ -49,6 +49,10 @@ impl Document {
             path.canonicalize()
                 .map_err(|e| format!("cannot open {}: {e}", path.display()))?,
         );
+        // Stat BEFORE reading: a write landing between the two then carries
+        // a newer mtime than the one recorded, so the disk poll sees it
+        // (statting after the read, the same write was invisible).
+        let modified = fs::metadata(&absolute).and_then(|m| m.modified()).ok();
         let bytes =
             fs::read(&absolute).map_err(|e| format!("cannot read {}: {e}", absolute.display()))?;
         let file_type = FileType::from_path(&absolute);
@@ -65,7 +69,6 @@ impl Document {
                 (decode_text(bytes, &absolute)?, None)
             }
         };
-        let modified = fs::metadata(&absolute).and_then(|m| m.modified()).ok();
         let crlf = source.contains("\r\n");
         // Tables render from the grid (plus their true shape); prose and
         // code render through the one shared dispatch; plain renders
@@ -126,12 +129,7 @@ impl Document {
 /// copy). Binary files (PDFs, .docx, images…) get a message that says
 /// what to do instead of Rust's "stream did not contain valid UTF-8".
 fn decode_text(bytes: Vec<u8>, path: &Path) -> Result<String, String> {
-    String::from_utf8(bytes).map_err(|_| {
-        format!(
-            "cannot open {}: not a text file (Pound reads markdown and CSV)",
-            path.display()
-        )
-    })
+    String::from_utf8(bytes).map_err(|_| format!("cannot open {}: not a text file", path.display()))
 }
 
 /// The kinds of files Pound treats differently. One source of truth for
@@ -171,6 +169,19 @@ impl FileType {
             },
         }
     }
+
+    /// A lowercase noun for messages: `markdown`, `table`, the syntect
+    /// token (`json`) or `text file` (the view's renderer-crash banner —
+    /// Windows-only, hence the relaxed lint off-Windows).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            FileType::Markdown => "markdown",
+            FileType::Csv => "table",
+            FileType::Code(language) => language,
+            FileType::Plain => "text file",
+        }
+    }
 }
 
 /// `Path::canonicalize` returns Windows verbatim paths (`\\?\C:\…`,
@@ -206,6 +217,15 @@ pub struct Model {
     /// The file changed on disk while unsaved edits exist; auto-reload is
     /// paused until they are saved (unsaved edits always win).
     pub stale: bool,
+    /// The mtime the last disk poll handed to a reload. Only consulted
+    /// when that reload fails — see `failed_mtime`.
+    polled_mtime: Option<SystemTime>,
+    /// The mtime of a reload that failed (binary file, sharing violation
+    /// while another program writes). The poll skips it, so the failure
+    /// shows its banner once instead of re-appearing 800 ms after every
+    /// Dismiss; the next real change (a different mtime) retries, and any
+    /// successful load forgets it.
+    failed_mtime: Option<SystemTime>,
 }
 
 impl Model {
@@ -225,6 +245,7 @@ impl Model {
                 self.notice = None;
                 self.dirty = false;
                 self.stale = false;
+                self.failed_mtime = None;
                 self.revision += 1;
             }
             Err(e) => self.error = Some(e),
@@ -238,9 +259,9 @@ impl Model {
     /// Apply an edit from the source pane: replace the buffer, re-render
     /// the preview and remember that it is unsaved. Identical text is a
     /// no-op (no spurious re-render or revision bump). The synchronous
-    /// path (tests, headless callers); the GUI splits this into
-    /// [`Model::edit_buffer`] + [`Model::apply_render`] so the render
-    /// runs on a background thread.
+    /// path for tests; the GUI splits this into [`Model::edit_buffer`] +
+    /// [`Model::apply_render`] so the render runs on a background thread.
+    #[cfg(test)]
     pub fn edit(&mut self, text: &str) {
         if !self.edit_buffer(text) {
             return;
@@ -355,9 +376,10 @@ impl Model {
 
     /// Reload the document if its modification time changed on disk and
     /// there is nothing unsaved to protect. Returns `true` when the
-    /// document was reloaded. Synchronous path (tests); the GUI polls
+    /// document was reloaded. Synchronous path for tests; the GUI polls
     /// with [`Model::poll_disk_changed`] and adopts the background
     /// load's result via [`Model::adopt_reload`].
+    #[cfg(test)]
     pub fn reload_if_changed(&mut self) -> bool {
         if !self.poll_disk_changed() {
             return false;
@@ -384,6 +406,11 @@ impl Model {
         let Ok(modified) = meta.modified() else {
             return false;
         };
+        // A reload of this exact state already failed: do not retry (and
+        // re-raise the banner) until the file actually changes again.
+        if self.failed_mtime == Some(modified) {
+            return false;
+        }
         if doc.modified == Some(modified) {
             return false;
         }
@@ -391,6 +418,7 @@ impl Model {
             self.stale = true;
             return false;
         }
+        self.polled_mtime = Some(modified);
         true
     }
 
@@ -403,6 +431,7 @@ impl Model {
     pub fn adopt_reload(&mut self, result: Result<Document, String>) -> bool {
         match result {
             Ok(doc) => {
+                self.failed_mtime = None;
                 if self.dirty {
                     // The user typed while the reload was rendering.
                     self.stale = true;
@@ -420,6 +449,11 @@ impl Model {
             }
             Err(e) => {
                 self.error = Some(e);
+                // The disk state the poll acted on is now "seen": without
+                // this the poll returned true on every 800 ms tick and the
+                // banner re-appeared right after each Dismiss, for as long
+                // as the file stayed unreadable.
+                self.failed_mtime = self.polled_mtime.take();
                 false
             }
         }
@@ -473,7 +507,7 @@ mod tests {
         let doc = model.document.as_ref().expect("document loaded");
         assert_eq!(doc.name(), "doc");
         assert_eq!(doc.source, "# Hello\n\nworld **bold**");
-        assert!(doc.html.contains("<h1>Hello</h1>"));
+        assert!(doc.html.contains("<h1 id=\"hello\">Hello</h1>"));
         assert!(doc.html.contains("<strong>bold</strong>"));
         assert_eq!(model.error, None);
         assert_eq!(model.revision, 1);
@@ -516,7 +550,7 @@ mod tests {
         model.open(&md);
         let doc = model.document.as_ref().unwrap();
         assert_eq!(doc.file_type, FileType::Markdown);
-        assert!(doc.html.contains("<h1>"));
+        assert!(doc.html.contains("<h1 "));
     }
 
     #[test]
@@ -664,7 +698,7 @@ new **body**",
 
 new **body**"
         );
-        assert!(doc.html.contains("<h1>v2</h1>"));
+        assert!(doc.html.contains("<h1 id=\"v2\">v2</h1>"));
         assert!(doc.html.contains("<strong>body</strong>"));
         assert!(model.dirty);
         assert_eq!(model.revision, before + 1);
@@ -739,7 +773,7 @@ new **body**",
         );
         let page = fs::read_to_string(&target).unwrap();
         assert!(page.starts_with("<!doctype html>"));
-        assert!(page.contains("<h1>Export me</h1>"));
+        assert!(page.contains("<h1 id=\"export-me\">Export me</h1>"));
         assert!(page.contains(r#"src="pic-export.png""#), "{page}");
         assert_eq!(model.notice.as_deref(), Some("exported to export.html"));
         assert_eq!(model.error, None);
@@ -892,6 +926,47 @@ new **body**",
     }
 
     #[test]
+    fn a_failed_reload_shows_once_per_change() {
+        // The file turns unreadable (here: not UTF-8) while open. The poll
+        // must not retry the same disk state on every 800 ms tick — the
+        // banner used to re-appear right after each Dismiss, forever.
+        let path = temp_md("unreadable.md", "# v1");
+        let mut model = Model::default();
+        model.open(&path);
+        // Rewrite the file and force a distinct, later mtime (some
+        // filesystems share timestamps, so rewriting alone may not move it).
+        let rewrite_at = |contents: &[u8], secs: u64| {
+            fs::write(&path, contents).unwrap();
+            let later = SystemTime::now() + Duration::from_secs(secs);
+            fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(later)
+                .unwrap();
+        };
+
+        rewrite_at(&[0xff, 0xfe, 0x00, 0x80], 5);
+        assert!(!model.reload_if_changed());
+        assert!(model.error.is_some(), "the failure is reported once");
+        model.dismiss_error();
+        assert!(!model.poll_disk_changed(), "same mtime: no retry");
+        assert!(model.error.is_none(), "and no re-raised banner");
+
+        // A real change retries — and succeeds once the file is text again.
+        rewrite_at(b"# v2", 10);
+        assert!(model.poll_disk_changed(), "a new mtime is polled again");
+        assert!(model.reload_if_changed());
+        assert_eq!(model.document.as_ref().unwrap().source, "# v2");
+        assert!(model.error.is_none());
+
+        // The failed state is forgotten: a later change to the same file
+        // is polled normally (no stale skip).
+        rewrite_at(b"# v3", 15);
+        assert!(model.poll_disk_changed());
+    }
+
+    #[test]
     fn reloads_when_mtime_changes() {
         let path = temp_md("watch.md", "# v1");
         let mut model = Model::default();
@@ -907,7 +982,7 @@ new **body**",
 
         assert!(model.reload_if_changed());
         let doc = model.document.as_ref().unwrap();
-        assert!(doc.html.contains("<h1>v2</h1>"));
+        assert!(doc.html.contains("<h1 id=\"v2\">v2</h1>"));
         assert_eq!(model.revision, 2);
     }
 
@@ -942,7 +1017,7 @@ new **body**",
         assert!(model.apply_render(html));
         assert_eq!(model.revision, base + 1);
         let rendered = &model.document.as_ref().unwrap().html;
-        assert!(rendered.contains("<h1>v2"), "{rendered}");
+        assert!(rendered.contains("<h1 id=\"v2-new\">v2 "), "{rendered}");
         assert!(rendered.contains("<strong>new</strong>"), "{rendered}");
     }
 

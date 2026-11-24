@@ -13,6 +13,7 @@
 //! - the result is sanitized with ammonia: markdown files can contain raw
 //!   HTML, and file content must never execute in the reader
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -35,7 +36,7 @@ pub fn to_html(source: &str, base_dir: &Path) -> String {
     let mut raw = String::new();
     push_blocks(
         &mut raw,
-        highlight_codeblocks(events),
+        slug_headings(highlight_codeblocks(events)),
         &line_start_offsets(source),
     );
     sanitize(&raw)
@@ -118,12 +119,101 @@ where
     out.into_iter()
 }
 
+/// One event with the source byte range it came from.
+type Spanned<'a> = (Event<'a>, std::ops::Range<usize>);
+
 /// The first token of a fence info string ("```rust,ignore" -> "rust");
 /// `None` for an empty info string.
 fn first_token(info: &str) -> Option<String> {
     info.split([',', ' ', ';', '\t', ':'])
         .find(|token| !token.is_empty())
         .map(str::to_owned)
+}
+
+/// Give every heading an `id` — a GitHub-style slug of its text, with
+/// `-1`, `-2`… suffixes for repeats — so `[Intro](#intro)` links have a
+/// target to scroll to (the shell resolves `#…` clicks itself; exported
+/// pages work in plain browsers). pulldown-cmark generates no ids, so
+/// without this the anchor path had nothing to find. Headings are
+/// buffered until their text is known; ranges pass through untouched.
+fn slug_headings<'a, I>(events: I) -> impl Iterator<Item = Spanned<'a>>
+where
+    I: Iterator<Item = Spanned<'a>>,
+{
+    /// A heading while its text is still arriving.
+    struct Heading<'a> {
+        events: Vec<Spanned<'a>>,
+        text: String,
+    }
+    let mut heading: Option<Heading<'a>> = None;
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut out: Vec<Spanned<'a>> = Vec::new();
+    for (event, range) in events {
+        match (&event, &mut heading) {
+            (Event::Start(Tag::Heading { .. }), None) => {
+                heading = Some(Heading {
+                    events: vec![(event, range)],
+                    text: String::new(),
+                });
+            }
+            (Event::End(TagEnd::Heading(_)), Some(open)) => {
+                open.events.push((event, range));
+                let mut open = heading.take().unwrap();
+                // First occurrence takes the bare slug, later ones `-1`, `-2`…
+                let slug = slug_for(&open.text);
+                let count = seen.entry(slug.clone()).or_default();
+                let id = if *count == 0 {
+                    slug
+                } else {
+                    format!("{slug}-{count}")
+                };
+                *count += 1;
+                // The first buffered event is the Start matched above.
+                if let Some((Event::Start(Tag::Heading { id: slot, .. }), _)) =
+                    open.events.first_mut()
+                {
+                    *slot = Some(CowStr::from(id));
+                }
+                out.extend(open.events);
+            }
+            (_, Some(open)) => {
+                if let Event::Text(text) | Event::Code(text) = &event {
+                    open.text.push_str(text);
+                }
+                open.events.push((event, range));
+            }
+            _ => out.push((event, range)),
+        }
+    }
+    // Unreachable for balanced streams; kept so a malformed one never
+    // drops a trailing heading.
+    if let Some(open) = heading {
+        out.extend(open.events);
+    }
+    out.into_iter()
+}
+
+/// GitHub-style heading slug: lowercase, letters/digits/`-`/`_` kept,
+/// every other character dropped, each run of whitespace one `-`
+/// (`"What's new?"` → `whats-new`). Empty text yields `section`.
+fn slug_for(text: &str) -> String {
+    let mut slug = String::with_capacity(text.len());
+    let mut pending_dash = false;
+    for c in text.trim().to_lowercase().chars() {
+        if c.is_alphanumeric() || matches!(c, '-' | '_') {
+            if pending_dash && !slug.is_empty() {
+                slug.push('-');
+            }
+            pending_dash = false;
+            slug.push(c);
+        } else if c.is_whitespace() {
+            pending_dash = true;
+        }
+    }
+    if slug.is_empty() {
+        slug.push_str("section");
+    }
+    slug
 }
 
 /// Syntect's packed default syntaxes, parsed once per process (a few
@@ -362,6 +452,20 @@ fn hex(byte: Option<&u8>) -> Option<u8> {
 /// `<input type="checkbox">`), strip scripts, event handlers and styling
 /// from raw HTML embedded in the file. Also the sanitizer for the
 /// config-file view (`code.rs`).
+/// The heading tags: the only elements allowed an `id` (the slug
+/// anchors `slug_headings` emits), and the ones whose id must be
+/// slug-shaped (`is_slug`).
+const HEADING_TAGS: [&str; 6] = ["h1", "h2", "h3", "h4", "h5", "h6"];
+
+/// Whether `value` looks like one of our heading slugs: non-empty,
+/// lowercase letters/digits (Unicode) plus `-` and `_`.
+fn is_slug(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c == '-' || c == '_' || (c.is_alphanumeric() && !c.is_uppercase()))
+}
+
 pub(crate) fn sanitize(raw: &str) -> String {
     let tags = [
         "a",
@@ -422,7 +526,8 @@ pub(crate) fn sanitize(raw: &str) -> String {
     .into_iter()
     .collect::<std::collections::HashSet<&str>>();
 
-    ammonia::Builder::new()
+    let mut builder = ammonia::Builder::new();
+    builder
         .tags(tags)
         .add_tag_attributes("input", ["type", "checked", "disabled"])
         // Highlighting emits `<span class="keyword …">` inside code
@@ -439,9 +544,24 @@ pub(crate) fn sanitize(raw: &str) -> String {
         // `file:` link hrefs survive too: the host opens them in a new
         // Pound window (see the link ipc), never a navigation.
         .add_url_schemes(["poundimg", "data", "file"])
-        .url_relative(ammonia::UrlRelative::PassThrough)
-        .clean(raw)
-        .to_string()
+        .url_relative(ammonia::UrlRelative::PassThrough);
+    // Heading ids are the slug anchors; nothing else may carry an id (a
+    // file's raw HTML could otherwise shadow the shell's own element ids).
+    for tag in HEADING_TAGS {
+        builder.add_tag_attributes(tag, ["id"]);
+    }
+    // Tighten two attribute values: a task list's input is a checkbox (a
+    // file must not render a file picker or a fake text box), and a
+    // heading's id must look like one of our slugs.
+    builder.attribute_filter(|element, attribute, value| {
+        let keep = match (element, attribute) {
+            ("input", "type") => value == "checkbox",
+            (tag, "id") if HEADING_TAGS.contains(&tag) => is_slug(value),
+            _ => true,
+        };
+        keep.then(|| value.into())
+    });
+    builder.clean(raw).to_string()
 }
 
 /// Performance smoke test for the render pipeline (kept ignored, like
@@ -524,7 +644,9 @@ mod tests {
         let source = "# Title\n\npara one\ncontinues\n\n```rust\nfn main() {}\n```\n";
         let html = to_html(source, &dir());
         assert!(
-            html.contains(r#"<div data-line-start="1" data-line-end="1"><h1>Title</h1>"#),
+            html.contains(
+                r#"<div data-line-start="1" data-line-end="1"><h1 id="title">Title</h1>"#
+            ),
             "html was: {html}"
         );
         assert!(
@@ -540,7 +662,7 @@ mod tests {
     #[test]
     fn headings_and_emphasis() {
         let html = to_html("# Title\n\nHello **bold** and *it* and `code`", &dir());
-        assert!(html.contains("<h1>Title</h1>"));
+        assert!(html.contains("<h1 id=\"title\">Title</h1>"));
         assert!(html.contains("<strong>bold</strong>"));
         assert!(html.contains("<em>it</em>"));
         assert!(html.contains("<code>code</code>"));
@@ -599,6 +721,48 @@ mod tests {
         assert!(!html.contains("script"));
         assert!(!html.contains("onclick"));
         assert!(html.contains("<b>bold</b>"));
+    }
+
+    #[test]
+    fn headings_get_github_style_anchor_ids() {
+        // pulldown emits no ids itself; without ours, `[x](#intro)` had
+        // nothing to scroll to (the shell's anchor path was dead).
+        let html = to_html(
+            "# Hello World\n\n## What's new?\n\n## Hello, World!\n\n### Hello World\n\n\
+             [a](#hello-world) [b](#whats-new) [c](#hello-world-1) [d](#hello-world-2)",
+            &dir(),
+        );
+        assert!(
+            html.contains("<h1 id=\"hello-world\">Hello World</h1>"),
+            "{html}"
+        );
+        assert!(html.contains("<h2 id=\"whats-new\">"), "{html}");
+        // Repeats get -1, -2 (github-slugger), never a collision.
+        assert!(html.contains("<h2 id=\"hello-world-1\">"), "{html}");
+        assert!(html.contains("<h3 id=\"hello-world-2\">"), "{html}");
+        // The hrefs survive sanitization and the line wrappers still wrap.
+        assert!(html.contains("href=\"#hello-world-1\""), "{html}");
+        assert!(
+            html.contains("data-line-start=\"1\" data-line-end=\"1\""),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn raw_html_cannot_pick_arbitrary_ids_or_input_types() {
+        // ids: only headings, only slug-shaped. A file's raw HTML cannot
+        // shadow the shell's own element ids on arbitrary elements.
+        let html = to_html(
+            "<div id=\"source\">x</div>\n\n<h2 id=\"Update Now!\">t</h2>\n\n\
+             <input type=\"file\"><input type=\"text\">\n\n- [ ] task\n",
+            &dir(),
+        );
+        assert!(!html.contains("id=\"source\""), "{html}");
+        assert!(!html.contains("id=\"Update Now!\""), "{html}");
+        // A task list's checkbox keeps its type; nothing else does.
+        assert!(!html.contains("type=\"file\""), "{html}");
+        assert!(!html.contains("type=\"text\""), "{html}");
+        assert!(html.contains("type=\"checkbox\""), "{html}");
     }
 
     #[test]

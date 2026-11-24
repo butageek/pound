@@ -1,4 +1,6 @@
-//! Pound — a small markdown reader with a side-by-side source pane.
+//! Pound — a lightweight file viewer for Windows: markdown renders with a
+//! side-by-side source pane, delimited files as tables, config files
+//! highlighted, any other text file in the editor.
 //!
 //! Architecture (MVP pattern):
 //! - [`model`]      : state (document, view mode, errors)
@@ -49,6 +51,19 @@ use std::path::PathBuf;
 
 use cli::Command;
 
+/// println!, but tolerant of a closed or absent stdout: installers capture
+/// CLI output via redirected pipes and sometimes close them early, and a
+/// GUI-subsystem launch from Explorer has no console at all — a print
+/// panic must never fail an otherwise successful `--help` or
+/// `register`. (`writeln!` returns an error instead of panicking; errors
+/// are ignored.)
+pub(crate) fn say(line: &str) {
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = writeln!(out, "{line}");
+    let _ = out.flush();
+}
+
 fn main() {
     match cli::parse(std::env::args().skip(1)) {
         Command::Gui { file } => run_gui(file),
@@ -62,11 +77,11 @@ fn main() {
         }
         Command::Help => {
             prepare_console();
-            println!("{}", cli::usage());
+            say(&cli::usage());
         }
         Command::Version => {
             prepare_console();
-            println!("pound {}", env!("CARGO_PKG_VERSION"));
+            say(&format!("pound {}", env!("CARGO_PKG_VERSION")));
         }
     }
 }
